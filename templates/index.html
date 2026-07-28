@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiniTube</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #121212;
+            color: #fff;
+            font-family: system-ui, -apple-system, sans-serif;
+            padding: 16px;
+        }
+        h1 { margin-bottom: 20px; font-size: 1.5rem; }
+        .upload-box {
+            background: #1e1e1e;
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+        }
+        .upload-box input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border: none;
+            border-radius: 8px;
+            background: #2a2a2a;
+            color: white;
+        }
+        .upload-box input[type="file"] {
+            margin-bottom: 10px;
+            color: #ccc;
+        }
+        .upload-box button {
+            background: #ff0000;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .video-card {
+            background: #1e1e1e;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .video-card h3 {
+            margin-bottom: 8px;
+        }
+        .stats {
+            color: #aaa;
+            font-size: 0.9rem;
+            margin-bottom: 12px;
+        }
+        .btn {
+            display: inline-block;
+            background: #ff0000;
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+        .like-btn {
+            background: #333;
+            border: none;
+            color: white;
+            padding: 8px 14px;
+            border-radius: 20px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        .like-btn:hover { background: #ff4757; }
+    </style>
+</head>
+<body>
+    <h1>📺 MiniTube</h1>
+
+    <div class="upload-box">
+        <form action="/upload" method="POST" enctype="multipart/form-data">
+            <input type="text" name="title" placeholder="Video başlığı" required>
+            <input type="file" name="video" accept="video/*" required>
+            <button type="submit">Yükle</button>
+        </form>
+    </div>
+
+    {% for video in videos %}
+    <div class="video-card">
+        <h3>{{ video.title }}</h3>
+        <div class="stats">
+            👁 {{ video.views }} görüntülenme &nbsp;|&nbsp;
+            ❤️ {{ video.likes if video.likes is defined else 0 }} beğeni
+        </div>
+        <a class="btn" href="/watch/{{ video.filename }}">▶ Videoyu Aç</a>
+    </div>
+    {% else %}
+    <p style="color:#888;">Henüz video yok.</p>
+    {% endfor %}
+</body>
+</html>

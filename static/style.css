@@ -1,0 +1,47 @@
+body {
+    background: #0f0f0f;
+    color: white;
+    font-family: Arial, sans-serif;
+    margin: 0;
+}
+
+header {
+    background: #202020;
+    padding: 15px;
+    font-size: 28px;
+    font-weight: bold;
+    border-bottom: 1px solid #333;
+}
+
+.container {
+    padding: 20px;
+}
+
+.upload {
+    background: #202020;
+    padding: 15px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+
+button {
+    background: #ff0000;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.video-card {
+    background: #202020;
+    border-radius: 12px;
+    padding: 15px;
+    margin-bottom: 25px;
+}
+
+video {
+    width: 100%;
+    max-width: 600px;
+    border-radius: 10px;
+}

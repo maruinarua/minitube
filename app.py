@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, redirect, send_from_directory, jsonify
+from werkzeug.utils import secure_filename
 import os
 import json
 from datetime import datetime
@@ -23,6 +24,16 @@ def save_videos(videos):
     with open(DB_FILE, "w") as f:
         json.dump(videos, f, indent=2)
 
+def unique_filename(filename):
+    # Aynı isimli yükleme eskisinin üzerine yazmasın diye sona sayı ekliyoruz
+    name, ext = os.path.splitext(filename)
+    candidate = filename
+    counter = 1
+    while os.path.exists(os.path.join(UPLOAD_FOLDER, candidate)):
+        candidate = f"{name}_{counter}{ext}"
+        counter += 1
+    return candidate
+
 @app.route("/")
 def home():
     videos = load_videos()
@@ -34,7 +45,12 @@ def upload():
     title = request.form.get("title", "").strip()
 
     if file and file.filename != "" and title:
-        filename = file.filename
+        # Kullanıcının verdiği ad doğrudan kullanılırsa uploads/ dışına yazılabilir
+        filename = secure_filename(file.filename)
+        if not filename:
+            return redirect("/")
+
+        filename = unique_filename(filename)
         file.save(os.path.join(UPLOAD_FOLDER, filename))
 
         videos = load_videos()

@@ -30,9 +30,9 @@ class MiniTubeTest(unittest.TestCase):
         self.tmp = os.path.join(self.root, "app")
         os.makedirs(self.tmp)
 
-        os.environ["MINITUBE_SECRET_KEY"] = TEST_KEY
-        os.environ.pop("MINITUBE_DEBUG", None)
-        os.environ.pop("MINITUBE_MAX_UPLOAD_MB", None)
+        os.environ["SECRET_KEY"] = TEST_KEY
+        os.environ.pop("FLASK_DEBUG", None)
+        os.environ.pop("MAX_UPLOAD_MB", None)
         os.environ.update(self.env)
 
         shutil.copy(os.path.join(REPO, "app.py"), os.path.join(self.tmp, "app.py"))
@@ -62,6 +62,11 @@ class MiniTubeTest(unittest.TestCase):
             follow_redirects=True,
         )
 
+    def upload_video(self, filename="clip.mp4", data=b"VIDEO-BYTES", title="Test"):
+        """Yükler ve diske yazılan gerçek adı döndürür (uuid eki nedeniyle)."""
+        self.upload(filename, data=data, title=title)
+        return self.stored()[-1]["filename"]
+
     def stored(self):
         with open(os.path.join(self.tmp, "videos.json")) as f:
             return json.load(f)
@@ -81,7 +86,12 @@ class UploadSecurityTests(MiniTubeTest):
         # uploads/../../escaped.mp4 tam olarak test kökümüze denk geliyor
         escaped = os.path.join(self.root, "escaped.mp4")
         self.assertFalse(os.path.exists(escaped), "yükleme uploads/ dışına yazdı")
-        self.assertIn("escaped.mp4", self.uploads_dir())
+
+        saved = self.uploads_dir()
+        self.assertEqual(len(saved), 1)
+        # build_safe_filename uuid eki koyuyor: escaped-<hex>.mp4
+        self.assertTrue(saved[0].startswith("escaped-"), saved[0])
+        self.assertTrue(saved[0].endswith(".mp4"), saved[0])
 
     def test_absolute_path_stays_inside_uploads(self):
         target = os.path.join(self.root, "pwned.mp4")
@@ -132,14 +142,14 @@ class UploadTypeTests(MiniTubeTest):
 
 
 class UploadSizeTests(MiniTubeTest):
-    env = {"MINITUBE_MAX_UPLOAD_MB": "1"}
+    env = {"MAX_UPLOAD_MB": "1"}
 
     def test_limit_is_configured(self):
         self.assertEqual(self.module.app.config["MAX_CONTENT_LENGTH"], 1024 * 1024)
 
     def test_oversized_upload_is_rejected(self):
         response = self.upload("big.mp4", data=b"x" * (2 * 1024 * 1024))
-        self.assertEqual(response.status_code, 200)  # 413 yakalanıp ana sayfaya dönülüyor
+        self.assertEqual(response.status_code, 413)
         self.assertEqual(self.stored(), [])
         self.assertEqual(self.uploads_dir(), [])
 
@@ -151,8 +161,8 @@ class UploadSizeTests(MiniTubeTest):
 class PrivacyTests(MiniTubeTest):
 
     def test_comment_does_not_store_ip(self):
-        self.upload("clip.mp4")
-        self.client.post("/comment/clip.mp4", data={"comment": "merhaba"})
+        name = self.upload_video()
+        self.client.post(f"/comment/{name}", data={"comment": "merhaba"})
 
         comment = self.stored()[0]["comments"][0]
         self.assertNotIn("ip", comment)
@@ -160,8 +170,8 @@ class PrivacyTests(MiniTubeTest):
         self.assertNotIn("127.0.0.1", json.dumps(self.stored()))
 
     def test_like_stores_hash_not_raw_ip(self):
-        self.upload("clip.mp4")
-        self.client.post("/like/clip.mp4", environ_base={"REMOTE_ADDR": "203.0.113.9"})
+        name = self.upload_video()
+        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "203.0.113.9"})
 
         liked_by = self.stored()[0]["liked_by"]
         self.assertEqual(len(liked_by), 1)
@@ -207,47 +217,55 @@ class PrivacyTests(MiniTubeTest):
 class BehaviourTests(MiniTubeTest):
 
     def test_like_toggles_both_ways(self):
-        self.upload("clip.mp4")
-        first = self.client.post("/like/clip.mp4").get_json()
-        second = self.client.post("/like/clip.mp4").get_json()
+        name = self.upload_video()
+        first = self.client.post(f"/like/{name}").get_json()
+        second = self.client.post(f"/like/{name}").get_json()
         self.assertEqual(first, {"likes": 1, "liked": True})
         self.assertEqual(second, {"likes": 0, "liked": False})
 
     def test_separate_viewers_like_independently(self):
-        self.upload("clip.mp4")
-        self.client.post("/like/clip.mp4", environ_base={"REMOTE_ADDR": "10.0.0.1"})
-        self.client.post("/like/clip.mp4", environ_base={"REMOTE_ADDR": "10.0.0.2"})
+        name = self.upload_video()
+        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.2"})
         self.assertEqual(self.stored()[0]["likes"], 2)
 
     def test_watch_counts_views_and_serves_file(self):
-        self.upload("clip.mp4", data=b"VID")
-        self.assertEqual(self.client.get("/watch/clip.mp4").status_code, 200)
+        name = self.upload_video(data=b"VID")
+        self.assertEqual(self.client.get(f"/watch/{name}").status_code, 200)
         self.assertEqual(self.stored()[0]["views"], 1)
-        served = self.client.get("/uploads/clip.mp4")
+        served = self.client.get(f"/uploads/{name}")
         self.assertEqual(served.data, b"VID")
         served.close()
 
     def test_watch_uses_matching_mimetype(self):
-        self.upload("clip.webm")
-        page = self.client.get("/watch/clip.webm").get_data(as_text=True)
+        name = self.upload_video("clip.webm")
+        page = self.client.get(f"/watch/{name}").get_data(as_text=True)
         self.assertIn('type="video/webm"', page)
 
     def test_missing_video_returns_404(self):
         self.assertEqual(self.client.get("/watch/yok.mp4").status_code, 404)
 
+    def test_nosniff_header_on_every_response(self):
+        name = self.upload_video(data=b"VID")
+        for path in ("/", f"/watch/{name}", f"/uploads/{name}"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+                response.close()
+
     def test_comment_is_capped_and_escaped(self):
-        self.upload("clip.mp4")
-        self.client.post("/comment/clip.mp4", data={"comment": "a" * 5000})
+        name = self.upload_video()
+        self.client.post(f"/comment/{name}", data={"comment": "a" * 5000})
         self.assertEqual(len(self.stored()[0]["comments"][0]["text"]),
                          self.module.MAX_COMMENT_LENGTH)
 
-        self.client.post("/comment/clip.mp4", data={"comment": "<script>alert(1)</script>"})
-        page = self.client.get("/watch/clip.mp4").get_data(as_text=True)
+        self.client.post(f"/comment/{name}", data={"comment": "<script>alert(1)</script>"})
+        page = self.client.get(f"/watch/{name}").get_data(as_text=True)
         self.assertNotIn("<script>alert(1)</script>", page)
 
     def test_empty_comment_is_ignored(self):
-        self.upload("clip.mp4")
-        self.client.post("/comment/clip.mp4", data={"comment": "   "})
+        name = self.upload_video()
+        self.client.post(f"/comment/{name}", data={"comment": "   "})
         self.assertEqual(self.stored()[0]["comments"], [])
 
 
@@ -257,15 +275,15 @@ class ConfigTests(MiniTubeTest):
         self.assertFalse(self.module.debug_enabled())
 
     def test_debug_is_opt_in(self):
-        for value in ("1", "true", "TRUE", "yes", "on"):
-            os.environ["MINITUBE_DEBUG"] = value
-            self.assertTrue(self.module.debug_enabled(), value)
-        for value in ("", "0", "false", "no"):
-            os.environ["MINITUBE_DEBUG"] = value
+        # CLAUDE.md'de belgelenen sözleşme tam olarak FLASK_DEBUG=1
+        os.environ["FLASK_DEBUG"] = "1"
+        self.assertTrue(self.module.debug_enabled())
+        for value in ("", "0", "true", "yes"):
+            os.environ["FLASK_DEBUG"] = value
             self.assertFalse(self.module.debug_enabled(), value)
 
     def test_secret_key_persists_across_restarts(self):
-        os.environ.pop("MINITUBE_SECRET_KEY", None)
+        os.environ.pop("SECRET_KEY", None)
         sys.modules.pop("app", None)
         first = importlib.import_module("app")
         generated = first.SECRET_KEY
@@ -275,7 +293,7 @@ class ConfigTests(MiniTubeTest):
         self.assertEqual(generated, second.SECRET_KEY)
 
     def test_secret_file_is_not_world_readable(self):
-        os.environ.pop("MINITUBE_SECRET_KEY", None)
+        os.environ.pop("SECRET_KEY", None)
         sys.modules.pop("app", None)
         importlib.import_module("app")
         mode = os.stat(os.path.join(self.tmp, ".secret_key")).st_mode

@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import secrets
+import uuid
 
 app = Flask(__name__)
 
@@ -14,14 +15,15 @@ UPLOAD_FOLDER = "uploads"
 DB_FILE = "videos.json"
 SECRET_FILE = ".secret_key"
 
-# Tarayıcıların oynatabildiği video türleri
+# Sadece video uzantıları: uploads/ aynı origin'den servis edildiği için
+# .html/.svg gibi dosyalar yüklenirse saklı XSS'e dönüşür.
 ALLOWED_EXTENSIONS = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".m4v"}
 
-MAX_UPLOAD_MB = int(os.environ.get("MINITUBE_MAX_UPLOAD_MB", "200"))
-MAX_COMMENT_LENGTH = 1000
-
-# Sınırı Flask'ın kendisi uygular; büyük gövde diske yazılmadan reddedilir
+# Yükleme boyutu sınırı (varsayılan 256 MB)
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "256"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
+MAX_COMMENT_LENGTH = 1000
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -33,7 +35,7 @@ if not os.path.exists(DB_FILE):
 def load_secret_key():
     # Anahtar yeniden başlatmalar arasında sabit kalmalı, yoksa beğeni
     # kimlikleri tutmaz. Önce ortam değişkeni, sonra yerel dosya.
-    from_env = os.environ.get("MINITUBE_SECRET_KEY")
+    from_env = os.environ.get("SECRET_KEY")
     if from_env:
         return from_env.encode()
 
@@ -65,7 +67,7 @@ def is_viewer_id(value):
     )
 
 def debug_enabled():
-    return os.environ.get("MINITUBE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("FLASK_DEBUG", "0") == "1"
 
 def normalize_video(video):
     # Eski kayıtlarda eksik alanları tamamlar ve düz IP kalıntılarını siler.
@@ -118,15 +120,24 @@ def save_videos(videos):
     with open(DB_FILE, "w") as f:
         json.dump(videos, f, indent=2)
 
-def unique_filename(filename):
-    # Aynı isimli yükleme eskisinin üzerine yazmasın diye sona sayı ekliyoruz
-    name, ext = os.path.splitext(filename)
-    candidate = filename
-    counter = 1
-    while os.path.exists(os.path.join(UPLOAD_FOLDER, candidate)):
-        candidate = f"{name}_{counter}{ext}"
-        counter += 1
-    return candidate
+def build_safe_filename(original_name):
+    """Yüklenen dosya adını güvenli ve benzersiz hale getirir.
+
+    secure_filename dizin geçişini (../) engeller, uuid eki ise aynı adlı
+    yüklemelerin birbirini ezmesini önler. Uzantı izin listesinde değilse
+    None döner.
+    """
+    cleaned = secure_filename(original_name or "")
+    base, ext = os.path.splitext(cleaned)
+    ext = ext.lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        return None
+
+    if not base:
+        base = "video"
+
+    return f"{base}-{uuid.uuid4().hex[:8]}{ext}"
 
 @app.context_processor
 def inject_limits():
@@ -149,18 +160,12 @@ def upload():
         flash("Başlık ve video dosyası zorunlu.")
         return redirect("/")
 
-    # Kullanıcının verdiği ad doğrudan kullanılırsa uploads/ dışına yazılabilir
-    filename = secure_filename(file.filename)
-    if not filename:
-        flash("Dosya adı geçersiz.")
-        return redirect("/")
-
-    extension = os.path.splitext(filename)[1].lower()
-    if extension not in ALLOWED_EXTENSIONS:
+    # Diske yazılan ad her zaman bu yardımcıdan geçer
+    filename = build_safe_filename(file.filename)
+    if filename is None:
         flash("Desteklenmeyen dosya türü. İzin verilenler: " + ", ".join(sorted(ALLOWED_EXTENSIONS)))
         return redirect("/")
 
-    filename = unique_filename(filename)
     file.save(os.path.join(UPLOAD_FOLDER, filename))
 
     videos = load_videos()
@@ -179,8 +184,9 @@ def upload():
 
 @app.errorhandler(413)
 def upload_too_large(error):
-    flash(f"Dosya çok büyük. En fazla {MAX_UPLOAD_MB} MB yükleyebilirsiniz.")
-    return redirect("/")
+    # Durum kodu 413 kalıyor; mesajı da ana sayfada gösteriyoruz
+    flash(f"Video çok büyük (en fazla {MAX_UPLOAD_MB} MB)")
+    return render_template("index.html", videos=load_videos()), 413
 
 @app.route("/watch/<filename>")
 def watch(filename):
@@ -252,13 +258,20 @@ def comment(filename):
 
 @app.route("/uploads/<filename>")
 def uploaded_file(filename):
+    # send_from_directory dizin dışına çıkan yolları kendisi reddeder.
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.after_request
+def add_security_headers(response):
+    # Tarayıcı, servis edilen dosyanın tipini tahmin etmeye çalışmasın.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 if __name__ == "__main__":
-    # debug=True hata sayfasından kod çalıştırmaya izin verir; üretimde kapalı
-    # olmalı. Açmak için MINITUBE_DEBUG=1 ile başlatın.
+    # Varsayılan olarak sadece localhost ve debug kapalı. Werkzeug debugger'ı
+    # uzaktan erişilebilir olursa kod çalıştırmaya izin verir.
     app.run(
-        host=os.environ.get("MINITUBE_HOST", "127.0.0.1"),
-        port=int(os.environ.get("MINITUBE_PORT", "5000")),
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "5000")),
         debug=debug_enabled()
     )

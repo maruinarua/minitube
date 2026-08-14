@@ -1,7 +1,15 @@
+# Çalışma sırasında üretilen veriler
+uploads/*
+!uploads/.gitkeep
+videos.json
+videos.db
+
+# Çalışma anahtarı - depoya girmemeli
+.secret_key
+
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 .venv-test/
-
-# Çalışma anahtarı - depoya girmemeli
-.secret_key
+venv/

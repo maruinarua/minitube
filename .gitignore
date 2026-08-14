@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv-test/
+
+# Çalışma anahtarı - depoya girmemeli
+.secret_key

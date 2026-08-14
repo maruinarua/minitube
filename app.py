@@ -1,12 +1,22 @@
 from flask import Flask, render_template, request, redirect, send_from_directory, jsonify
+from werkzeug.utils import secure_filename
 import os
 import json
+import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 DB_FILE = "videos.json"
+
+# Sadece video uzantıları: uploads/ aynı origin'den servis edildiği için
+# .html/.svg gibi dosyalar yüklenirse saklı XSS'e dönüşür.
+ALLOWED_EXTENSIONS = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".m4v"}
+
+# Yükleme boyutu sınırı (varsayılan 256 MB)
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "256"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -23,6 +33,29 @@ def save_videos(videos):
     with open(DB_FILE, "w") as f:
         json.dump(videos, f, indent=2)
 
+def build_safe_filename(original_name):
+    """Yüklenen dosya adını güvenli ve benzersiz hale getirir.
+
+    secure_filename dizin geçişini (../) engeller, uuid eki ise aynı adlı
+    yüklemelerin birbirini ezmesini önler. Uzantı izin listesinde değilse
+    None döner.
+    """
+    cleaned = secure_filename(original_name or "")
+    base, ext = os.path.splitext(cleaned)
+    ext = ext.lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        return None
+
+    if not base:
+        base = "video"
+
+    return f"{base}-{uuid.uuid4().hex[:8]}{ext}"
+
+@app.errorhandler(413)
+def upload_too_large(e):
+    return f"Video çok büyük (en fazla {MAX_UPLOAD_MB} MB)", 413
+
 @app.route("/")
 def home():
     videos = load_videos()
@@ -34,7 +67,10 @@ def upload():
     title = request.form.get("title", "").strip()
 
     if file and file.filename != "" and title:
-        filename = file.filename
+        filename = build_safe_filename(file.filename)
+        if filename is None:
+            return redirect("/")
+
         file.save(os.path.join(UPLOAD_FOLDER, filename))
 
         videos = load_videos()
@@ -133,7 +169,18 @@ def comment(filename):
 
 @app.route("/uploads/<filename>")
 def uploaded_file(filename):
+    # send_from_directory dizin dışına çıkan yolları kendisi reddeder.
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.after_request
+def add_security_headers(response):
+    # Tarayıcı, servis edilen dosyanın tipini tahmin etmeye çalışmasın.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Varsayılan olarak sadece localhost ve debug kapalı. Werkzeug debugger'ı
+    # uzaktan erişilebilir olursa kod çalıştırmaya izin verir.
+    host = os.environ.get("HOST", "127.0.0.1")
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host=host, port=int(os.environ.get("PORT", "5000")), debug=debug)

@@ -1,0 +1,11 @@
+# Çalışma sırasında üretilen veriler
+uploads/*
+!uploads/.gitkeep
+videos.json
+videos.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

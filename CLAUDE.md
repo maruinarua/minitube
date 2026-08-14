@@ -80,7 +80,7 @@ design, not a bug to patch silently.
 | Route | Method | Behavior |
 |---|---|---|
 | `/` | GET | Renders `index.html` with all videos |
-| `/upload` | POST | multipart form (`title`, `video`); saves file, appends record, redirects to `/` |
+| `/upload` | POST | multipart form (`title`, `video`); sanitizes+uniquifies the name, saves file, appends record, redirects to `/` |
 | `/watch/<filename>` | GET | Increments `views`, backfills fields, renders `watch.html`; 404 text `"Video bulunamadı"` |
 | `/like/<filename>` | POST | Toggles the caller's IP in `liked_by`; returns JSON `{likes, liked}` |
 | `/comment/<filename>` | POST | Form field `comment`; appends and redirects back to the watch page |
@@ -92,10 +92,19 @@ redirect. Preserve that split: don't convert form posts to fetch, or vice
 versa, without being asked.
 
 Validation is minimal and silent. `/upload` requires a file, a non-empty
-filename, and a non-empty title; if any is missing it redirects to `/` with no
-error message. `/comment` drops empty comments the same way. That silence is
-existing behavior — if you add error reporting, it's a visible product change,
-so mention it.
+filename, a non-empty title, and an extension in `ALLOWED_EXTENSIONS`; if any
+is missing or the extension is rejected it redirects to `/` with no error
+message. `/comment` drops empty comments the same way. That silence is existing
+behavior — if you add error reporting, it's a visible product change, so
+mention it.
+
+**Upload naming.** `build_safe_filename()` is the only place a stored filename
+is produced. It runs `secure_filename` (kills `../` traversal), enforces the
+extension allowlist, and appends a short uuid so same-named uploads can't
+overwrite each other. Never write `file.filename` to disk directly — always go
+through this helper. The extension allowlist is a security control, not a
+convenience: `uploads/` is served from the app's own origin, so an uploaded
+`.html` or `.svg` would execute as same-origin script.
 
 ## Running it
 
@@ -104,8 +113,17 @@ Flask is the only dependency:
 
 ```bash
 pip install flask
-python app.py          # http://0.0.0.0:5000, debug=True
+python app.py          # http://127.0.0.1:5000, debug off
 ```
+
+Runtime knobs, all via environment variables:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `HOST` | `127.0.0.1` | Bind address. Only widen to `0.0.0.0` deliberately. |
+| `PORT` | `5000` | Port |
+| `FLASK_DEBUG` | `0` | `1` enables the Werkzeug debugger — localhost only, never with a public `HOST` |
+| `MAX_UPLOAD_MB` | `256` | Upload size cap; exceeding it returns 413 |
 
 `app.py` creates `uploads/` and an empty `videos.json` at import time if they
 don't exist, so a fresh clone runs without setup.
@@ -133,28 +151,36 @@ rather than folding it into an unrelated diff.
 - Existing comments in `app.py` are Turkish. Follow the surrounding language
   when adding comments; the codebase is sparsely commented, so don't add many.
 
+## Security invariants
+
+These are handled — don't regress them:
+
+- Stored filenames always come from `build_safe_filename()` (sanitized,
+  extension-allowlisted, uuid-suffixed).
+- Uploads are size-capped via `MAX_CONTENT_LENGTH`, with a 413 handler.
+- The server binds to localhost and runs with debug off unless `HOST` /
+  `FLASK_DEBUG` say otherwise.
+- Every response carries `X-Content-Type-Options: nosniff` (`add_security_headers`).
+- Templates rely on Jinja autoescaping for titles and comment text — no `|safe`.
+- Commenter IPs are stored but never rendered.
+
 ## Known sharp edges
 
-Real issues in the current code. Fix them when the task calls for it — flag,
-don't silently patch, when it doesn't:
+Still open. Fix when the task calls for it — flag, don't silently patch, when
+it doesn't:
 
-- **No filename sanitization.** `/upload` uses `file.filename` verbatim in
-  `os.path.join(UPLOAD_FOLDER, filename)`. A crafted name can traverse out of
-  `uploads/`. `werkzeug.utils.secure_filename` is the fix.
-- **Filename collisions overwrite.** Two uploads with the same name clobber the
-  file and create two records pointing at it. Uniquifying the stored name is
-  the fix (note the existing upload is already a hash-style name).
-- **`debug=True` with `host="0.0.0.0"`** exposes the Werkzeug debugger console
-  on every interface. Fine locally, unsafe anywhere else.
-- **Generated data is committed.** `videos.json`, `videos.db`, and the contents
-  of `uploads/` are all tracked in git, and there is no `.gitignore`. Running
-  the app locally dirties the working tree — check `git status` before
-  committing so you don't sweep test uploads or view-count churn into a diff.
-  Only commit these deliberately.
-- **No cap on upload size** (`MAX_CONTENT_LENGTH` is unset) and no MIME check
-  beyond the client-side `accept="video/*"`.
-- `watch.html` hardcodes `type="video/mp4"` on the `<source>`, so non-MP4
-  uploads may not play even though any video file is accepted.
+- **Generated data is committed.** `videos.json`, `videos.db`, and the existing
+  file in `uploads/` were committed before `.gitignore` existed, so they stay
+  tracked and `.gitignore` won't mask them. Note `videos.json` contains
+  commenter IP addresses. To stop tracking them without deleting local data:
+  `git rm --cached videos.json videos.db uploads/<file>`. Until then, check
+  `git status` before committing so test uploads and view-count churn don't
+  land in a diff.
+- **Content is not verified to be video** beyond the extension check — no
+  container/codec sniffing.
+- **No rate limiting** on uploads or comments.
+- **IP-based identity** is spoofable via proxies and collapses to one user
+  behind a reverse proxy (shared likes). Real accounts are the only real fix.
 
 ## Git
 

@@ -3,6 +3,7 @@ uploads/*
 !uploads/.gitkeep
 videos.json
 videos.db
+.videos-*.json
 
 # Çalışma anahtarı - depoya girmemeli
 .secret_key

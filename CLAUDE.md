@@ -17,10 +17,11 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 
 ```
 app.py           All routes, all persistence helpers. The entire backend.
-database.py      Standalone SQLite bootstrap script — NOT imported by app.py.
+test_app.py      Security/privacy test suite (stdlib unittest, no deps).
+requirements.txt Flask, the only runtime dependency.
 videos.json      The live datastore (a JSON array of video objects).
-videos.db        SQLite file created by database.py. Currently unused.
 uploads/         Uploaded video files, served at /uploads/<filename>.
+.secret_key      Generated HMAC/session key. Gitignored, mode 600.
 templates/
   index.html     Home: upload form + video list. Styles are inline in <style>.
   watch.html     Player page: video, like button (fetch/JSON), comments.
@@ -28,17 +29,16 @@ static/
   style.css      Legacy stylesheet. NOT linked from either template.
 ```
 
-Two things to know before you "fix" something that looks broken:
+One thing to know before you "fix" something that looks broken:
 
-- **`database.py` and `videos.db` are dead code.** `app.py` never imports
-  sqlite3 and never touches `videos.db`. The SQLite table (`videos` with
-  `id/title/filename/views/likes`) is a half-started migration that was never
-  wired up. Don't assume it is the source of truth. If asked to migrate to
-  SQLite, that's a real task — say so and do it deliberately, don't do it as a
-  side effect of another change.
 - **`static/style.css` is not loaded.** Both templates carry their own inline
   `<style>` block. Editing `style.css` changes nothing visible. To restyle a
   page, edit the `<style>` block in that template.
+
+`database.py` and `videos.db` used to sit here as a half-started SQLite
+migration that nothing imported. They were removed (the table had no rows).
+Storage is `videos.json`. If asked to migrate to SQLite, that's a real task —
+say so and do it deliberately, don't do it as a side effect of another change.
 
 ## Data model
 
@@ -51,9 +51,9 @@ by linear scan on `filename`, which is therefore the de facto primary key.
   "filename": "string",        // also the file name inside uploads/
   "views": 0,
   "likes": 0,
-  "liked_by": ["<ip>"],        // request.remote_addr strings
+  "liked_by": ["<viewer_id>"], // keyed HMAC of the IP, never the IP itself
   "comments": [
-    { "text": "string", "ip": "<ip>", "time": "DD.MM.YYYY HH:MM" }
+    { "text": "string", "time": "DD.MM.YYYY HH:MM" }
   ]
 }
 ```
@@ -64,16 +64,27 @@ write. There is no locking, so concurrent writes can lose data — acceptable at
 this scale, but don't build anything on top of it that assumes atomicity.
 
 **Backfill pattern:** older records may lack `likes`, `liked_by`, or
-`comments`. `watch()`, `like()`, and `comment()` each defensively insert the
-missing keys before use. If you add a new field to the video object, add the
-same `if "field" not in video` backfill to every route that reads it, or
-records written before your change will raise `KeyError`.
+`comments`. This is centralized in `normalize_video()`, which `load_videos()`
+runs over every record on every read, rewriting the file only if something
+changed. If you add a new field to the video object, add its default there —
+one place, not per route.
 
-**Identity is the client IP** (`request.remote_addr`). It gates like toggling
-and is stored on each comment (never rendered — `watch.html` shows only `time`
-and `text`). Keep it unrendered. Behind a reverse proxy every user collapses to
-one IP, so likes would be shared; that is a known limitation of the current
-design, not a bug to patch silently.
+`normalize_video()` also migrates legacy data in place: raw IP strings left in
+`liked_by` are hashed, and the old `ip` key is stripped from comments. Leave
+that migration in place; it is what keeps old files from reintroducing plain
+IPs.
+
+**Identity is a keyed hash of the client IP.** `viewer_id()` returns
+`HMAC-SHA256(SECRET_KEY, ip)` truncated to 32 hex chars, and only that value is
+persisted. A plain hash would not be enough — IPv4 is 2^32 values, so an
+unkeyed digest is brute-forceable; the key is what makes it irreversible.
+Comments store no identifier at all, since nothing ever read one.
+
+The key comes from `SECRET_KEY`, falling back to a generated `.secret_key`
+file. It must stay stable across restarts or existing likes stop matching their
+owners. Behind a reverse proxy every user still collapses to one address, so
+likes would be shared; that is a known limitation of the design, not a bug to
+patch silently.
 
 ## Routes
 
@@ -91,12 +102,11 @@ updates the counter in place. Everything else is a classic form POST +
 redirect. Preserve that split: don't convert form posts to fetch, or vice
 versa, without being asked.
 
-Validation is minimal and silent. `/upload` requires a file, a non-empty
-filename, a non-empty title, and an extension in `ALLOWED_EXTENSIONS`; if any
-is missing or the extension is rejected it redirects to `/` with no error
-message. `/comment` drops empty comments the same way. That silence is existing
-behavior — if you add error reporting, it's a visible product change, so
-mention it.
+`/upload` requires a file, a non-empty filename, a non-empty title, and an
+extension in `ALLOWED_EXTENSIONS`. Rejections now report back: the handler
+calls `flash()` and `index.html` renders the messages. `/comment` still drops
+empty comments silently. Comment text is truncated to `MAX_COMMENT_LENGTH`
+(1000) rather than rejected.
 
 **Upload naming.** `build_safe_filename()` is the only place a stored filename
 is produced. It runs `secure_filename` (kills `../` traversal), enforces the
@@ -108,11 +118,10 @@ convenience: `uploads/` is served from the app's own origin, so an uploaded
 
 ## Running it
 
-There is no `requirements.txt`, no lockfile, and no virtualenv checked in.
-Flask is the only dependency:
+Flask is the only dependency; there is no lockfile and no virtualenv checked in:
 
 ```bash
-pip install flask
+pip install -r requirements.txt
 python app.py          # http://127.0.0.1:5000, debug off
 ```
 
@@ -124,15 +133,21 @@ Runtime knobs, all via environment variables:
 | `PORT` | `5000` | Port |
 | `FLASK_DEBUG` | `0` | `1` enables the Werkzeug debugger — localhost only, never with a public `HOST` |
 | `MAX_UPLOAD_MB` | `256` | Upload size cap; exceeding it returns 413 |
+| `SECRET_KEY` | generated | HMAC/session key. Unset means a `.secret_key` file is generated and reused. |
 
-`app.py` creates `uploads/` and an empty `videos.json` at import time if they
-don't exist, so a fresh clone runs without setup.
+`app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
+import time if they don't exist, so a fresh clone runs without setup.
 
-There are **no tests, no linter config, and no CI**. Verify changes by running
-the server and exercising the flow (upload → watch → like → comment) and by
-checking that `videos.json` still parses. If you add tests or a
-`requirements.txt`, that's a net improvement — just call it out as an addition
-rather than folding it into an unrelated diff.
+There is a test suite and no linter config or CI:
+
+```bash
+python -m unittest -v          # 28 tests, stdlib only
+```
+
+`test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
+never touches the real `videos.json` or `uploads/`. It covers the security and
+privacy invariants below. Add to it when you touch upload handling, identity,
+or the data migration — those are the parts where a regression is silent.
 
 ## Conventions
 
@@ -162,20 +177,23 @@ These are handled — don't regress them:
   `FLASK_DEBUG` say otherwise.
 - Every response carries `X-Content-Type-Options: nosniff` (`add_security_headers`).
 - Templates rely on Jinja autoescaping for titles and comment text — no `|safe`.
-- Commenter IPs are stored but never rendered.
+- Client IPs are never persisted. Likes store `viewer_id()` (keyed HMAC);
+  comments store no identifier. `normalize_video()` scrubs legacy plain IPs on
+  load — don't remove it, and don't add `request.remote_addr` to a stored
+  record.
+- `.secret_key` is mode 600 and gitignored. Never commit it.
 
 ## Known sharp edges
 
 Still open. Fix when the task calls for it — flag, don't silently patch, when
 it doesn't:
 
-- **Generated data is committed.** `videos.json`, `videos.db`, and the existing
-  file in `uploads/` were committed before `.gitignore` existed, so they stay
-  tracked and `.gitignore` won't mask them. Note `videos.json` contains
-  commenter IP addresses. To stop tracking them without deleting local data:
-  `git rm --cached videos.json videos.db uploads/<file>`. Until then, check
-  `git status` before committing so test uploads and view-count churn don't
-  land in a diff.
+- **Generated data is committed.** `videos.json` and the existing file in
+  `uploads/` were committed before `.gitignore` existed, so they stay tracked
+  and `.gitignore` won't mask them. They no longer contain IP addresses, but
+  view-count churn still lands in diffs. To stop tracking them without deleting
+  local data: `git rm --cached videos.json uploads/<file>`. Until then, check
+  `git status` before committing.
 - **Content is not verified to be video** beyond the extension check — no
   container/codec sniffing.
 - **No rate limiting** on uploads or comments.

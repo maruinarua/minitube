@@ -269,6 +269,87 @@ class BehaviourTests(MiniTubeTest):
         self.assertEqual(self.stored()[0]["comments"], [])
 
 
+class PersistenceTests(MiniTubeTest):
+    """save_videos atomik olmalı: yarım dosya asla görünmemeli."""
+
+    def sample(self, count=200):
+        return [{"title": f"v{i}", "filename": f"v{i}.mp4", "views": i,
+                 "likes": 0, "liked_by": [], "comments": []} for i in range(count)]
+
+    def db_path(self):
+        return os.path.join(self.tmp, "videos.json")
+
+    def temp_leftovers(self):
+        return [n for n in os.listdir(self.tmp) if n.startswith(".videos-")]
+
+    def test_save_writes_expected_content(self):
+        self.module.save_videos(self.sample(3))
+        self.assertEqual(len(self.stored()), 3)
+        self.assertEqual(self.stored()[1]["filename"], "v1.mp4")
+
+    def test_crash_during_save_leaves_previous_file_intact(self):
+        self.module.save_videos(self.sample(3))
+        before = self.stored()
+
+        real_dump = json.dump
+
+        def dying_dump(obj, fp, **kwargs):
+            fp.write('[\n  {\n    "title": "yar')   # yarım yazıp ölüyor
+            raise KeyboardInterrupt("süreç öldü")
+
+        json.dump = dying_dump
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                self.module.save_videos(self.sample(9))
+        finally:
+            json.dump = real_dump
+
+        # Eski dosya hâlâ tam ve okunabilir olmalı
+        self.assertEqual(self.stored(), before)
+        self.assertEqual(self.temp_leftovers(), [], "yarım geçici dosya kaldı")
+
+    def test_no_temp_files_left_after_success(self):
+        for _ in range(3):
+            self.module.save_videos(self.sample(2))
+        self.assertEqual(self.temp_leftovers(), [])
+
+    def test_concurrent_reads_never_see_partial_file(self):
+        import threading
+        import time
+
+        videos = self.sample(200)
+        self.module.save_videos(videos)
+
+        failures = []
+        stop = threading.Event()
+
+        def writer():
+            while not stop.is_set():
+                self.module.save_videos(videos)
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    self.module.load_videos()
+                except Exception as exc:      # JSONDecodeError dahil
+                    failures.append(repr(exc))
+
+        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+        for t in threads:
+            t.start()
+        time.sleep(0.7)
+        stop.set()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(failures[:3], [], f"{len(failures)} okuma yarım dosya gördü")
+
+    def test_existing_file_mode_is_preserved(self):
+        os.chmod(self.db_path(), 0o640)
+        self.module.save_videos(self.sample(1))
+        self.assertEqual(os.stat(self.db_path()).st_mode & 0o777, 0o640)
+
+
 class ConfigTests(MiniTubeTest):
 
     def test_debug_is_off_by_default(self):

@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import secrets
+import tempfile
 import uuid
 
 app = Flask(__name__)
@@ -117,8 +118,33 @@ def load_videos():
     return videos
 
 def save_videos(videos):
-    with open(DB_FILE, "w") as f:
-        json.dump(videos, f, indent=2)
+    # Doğrudan DB_FILE'a yazmak dosyayı önce sıfırlar: o aralıkta okuyan bir
+    # istek yarım JSON görür, yazarken süreç ölürse dosya kalıcı bozulur ve
+    # tüm rotalar 500 döner. Aynı dizine geçici dosya yazıp atomik olarak
+    # yerine koyuyoruz; okuyucu ya eski ya yeni dosyanın tamamını görür.
+    directory = os.path.dirname(os.path.abspath(DB_FILE)) or "."
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".videos-", suffix=".json")
+
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(videos, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # mkstemp 0600 veriyor; mevcut dosyanın iznini koruyalım
+        if os.path.exists(DB_FILE):
+            os.chmod(temp_path, os.stat(DB_FILE).st_mode & 0o777)
+        else:
+            os.chmod(temp_path, 0o644)
+
+        os.replace(temp_path, DB_FILE)
+    except BaseException:
+        # KeyboardInterrupt de dahil: geride yarım geçici dosya bırakmayalım
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 def build_safe_filename(original_name):
     """Yüklenen dosya adını güvenli ve benzersiz hale getirir.

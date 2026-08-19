@@ -3,6 +3,7 @@
 Çalıştırmak için:  python -m unittest -v
 """
 
+import contextlib
 import importlib
 import io
 import json
@@ -11,6 +12,17 @@ import shutil
 import sys
 import tempfile
 import unittest
+
+
+@contextlib.contextmanager
+def quiet_app_errors(app):
+    """Kasıtlı 500 üreten testlerde Flask'ın traceback logunu susturur."""
+    previous = app.logger.disabled
+    app.logger.disabled = True
+    try:
+        yield
+    finally:
+        app.logger.disabled = previous
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 TEST_KEY = "sabit-test-anahtari"
@@ -155,6 +167,115 @@ class UploadSizeTests(MiniTubeTest):
 
     def test_upload_under_limit_succeeds(self):
         self.upload("small.mp4", data=b"x" * 1000)
+        self.assertEqual(len(self.stored()), 1)
+
+
+class UploadFaultToleranceTests(MiniTubeTest):
+    """Yükleme sırasında bir şey ters giderse arkada çöp kalmamalı."""
+
+    def test_very_long_filename_is_accepted(self):
+        # Eskiden NAME_MAX aşıldığı için file.save() OSError verip 500 dönüyordu
+        response = self.upload("a" * 300 + ".mp4", title="uzun")
+        self.assertEqual(response.status_code, 200)
+
+        records = self.stored()
+        self.assertEqual(len(records), 1)
+        name = records[0]["filename"]
+        self.assertLessEqual(len(name), self.module.MAX_FILENAME_LENGTH)
+        self.assertTrue(name.endswith(".mp4"))
+        self.assertEqual(self.uploads_dir(), [name])
+
+    def test_generated_names_never_exceed_filesystem_limit(self):
+        for length in (1, 100, 250, 300, 1000):
+            with self.subTest(length=length):
+                name = self.module.build_safe_filename("b" * length + ".mp4")
+                self.assertLessEqual(len(name), self.module.MAX_FILENAME_LENGTH)
+                self.assertTrue(name.endswith(".mp4"))
+
+    def test_short_names_are_not_truncated(self):
+        name = self.module.build_safe_filename("tatil.mp4")
+        self.assertTrue(name.startswith("tatil-"), name)
+
+    def test_failed_record_write_leaves_no_orphan_file(self):
+        def out_of_space(videos):
+            raise OSError(28, "No space left on device")
+
+        original = self.module.save_videos
+        self.module.save_videos = out_of_space
+        try:
+            with quiet_app_errors(self.module.app):
+                self.upload("kayip.mp4")
+        finally:
+            self.module.save_videos = original
+
+        self.assertEqual(self.uploads_dir(), [], "kayıt yazılamadı ama dosya diskte kaldı")
+        self.assertEqual(self.stored(), [])
+
+    def test_corrupt_datastore_leaves_no_orphan_file(self):
+        with open(os.path.join(self.tmp, "videos.json"), "w") as f:
+            f.write("{bozuk")
+
+        with quiet_app_errors(self.module.app):
+            self.upload("kayip.mp4")
+        self.assertEqual(self.uploads_dir(), [], "kayıt okunamadı ama dosya diskte kaldı")
+
+    def test_successful_upload_is_unaffected(self):
+        name = self.upload_video("normal.mp4", data=b"VID")
+        self.assertEqual(len(self.stored()), 1)
+        self.assertEqual(self.uploads_dir(), [name])
+        with open(os.path.join(self.tmp, "uploads", name), "rb") as f:
+            self.assertEqual(f.read(), b"VID")
+
+
+class UploadValidationTests(MiniTubeTest):
+    """Mevcut doğrulama davranışını sabitler; değiştirmez."""
+
+    def test_missing_file_field_is_rejected_without_error(self):
+        response = self.client.post(
+            "/upload",
+            data={"title": "T"},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stored(), [])
+
+    def test_whitespace_only_title_is_rejected(self):
+        self.upload("clip.mp4", title="   ")
+        self.assertEqual(self.stored(), [])
+
+    def test_extension_only_filename_is_rejected(self):
+        self.upload(".mp4")
+        self.assertEqual(self.stored(), [])
+
+    def test_double_extension_stores_only_the_allowed_extension(self):
+        name = self.upload_video("evil.php.mp4")
+        self.assertEqual(os.path.splitext(name)[1], ".mp4")
+
+    def test_null_byte_in_filename_is_stripped(self):
+        name = self.upload_video("a\x00b.mp4")
+        self.assertNotIn("\x00", name)
+
+    def test_record_filename_matches_file_on_disk(self):
+        name = self.upload_video("tutarli.mp4")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "uploads", name)))
+
+    def test_empty_file_is_currently_accepted(self):
+        # Bilinen boşluk: içerik doğrulanmıyor, 0 baytlık dosya kabul ediliyor.
+        # Sessizce değişmesin diye sabitliyoruz.
+        name = self.upload_video("bos.mp4", data=b"")
+        self.assertEqual(len(self.stored()), 1)
+        self.assertEqual(os.path.getsize(os.path.join(self.tmp, "uploads", name)), 0)
+
+    def test_upload_requires_no_authentication(self):
+        # Yetkilendirme katmanı yok: kimlik bilgisi taşımayan istemci de
+        # yükleyebiliyor. Tasarım kararı, ama testte görünür olsun.
+        anonymous = self.module.app.test_client()
+        anonymous.post(
+            "/upload",
+            data={"title": "anon", "video": (io.BytesIO(b"VID"), "anon.mp4")},
+            content_type="multipart/form-data",
+        )
         self.assertEqual(len(self.stored()), 1)
 
 

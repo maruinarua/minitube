@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session
 from werkzeug.utils import secure_filename
+from collections import defaultdict, deque
 from datetime import datetime
 import hashlib
 import hmac
@@ -8,6 +9,8 @@ import mimetypes
 import os
 import secrets
 import tempfile
+import threading
+import time
 import uuid
 
 app = Flask(__name__)
@@ -35,6 +38,18 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 # Token gerektirmeyen, durum değiştirmeyen yöntemler
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+# Uç başına (istek sayısı, saniye) sınırı. Yükleme diski doldurabildiği için
+# en dar sınır onda. Kimlik yok, o yüzden istemci başına sayıyoruz.
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "3600"))
+RATE_LIMITS = {
+    "upload": int(os.environ.get("RATE_LIMIT_UPLOAD", "10")),
+    "comment": int(os.environ.get("RATE_LIMIT_COMMENT", "30")),
+    "like": int(os.environ.get("RATE_LIMIT_LIKE", "60")),
+}
+
+# Süresi geçmiş kayıtları ne sıklıkla süpüreceğimiz
+RATE_SWEEP_INTERVAL = 300
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -107,6 +122,73 @@ def verify_csrf():
     if request.endpoint == "like":
         return jsonify({"error": "Geçersiz veya eksik CSRF anahtarı"}), 403
     return "Geçersiz veya eksik CSRF anahtarı", 403
+
+# İstek zaman damgaları: (uç, viewer_id) -> deque[float]. Süreç içi tutuluyor,
+# yani birden çok worker ile çalıştırılırsa her worker kendi sayacını tutar ve
+# yeniden başlatmada sıfırlanır. Tek süreçlik bu uygulama için yeterli.
+_rate_hits = defaultdict(deque)
+_rate_lock = threading.Lock()
+_last_sweep = 0.0
+
+def _now():
+    # Testlerin zamanı ileri sarabilmesi için tek nokta
+    return time.monotonic()
+
+def _sweep_expired(now):
+    # Çağıran _rate_lock'u tutuyor olmalı. Süpürme olmazsa sözlük, saldırganın
+    # kullandığı her yeni IP için kalıcı bir kayıt biriktirirdi.
+    global _last_sweep
+    if now - _last_sweep < RATE_SWEEP_INTERVAL:
+        return
+    _last_sweep = now
+
+    for key in list(_rate_hits):
+        hits = _rate_hits[key]
+        while hits and hits[0] <= now - RATE_LIMIT_WINDOW:
+            hits.popleft()
+        if not hits:
+            del _rate_hits[key]
+
+def rate_limit_retry_after(endpoint, viewer):
+    """İzin varsa None döner ve isteği sayar.
+
+    Sınır aşıldıysa isteği saymadan, kaç saniye sonra tekrar denenebileceğini
+    döndürür.
+    """
+    limit = RATE_LIMITS[endpoint]
+    now = _now()
+
+    with _rate_lock:
+        _sweep_expired(now)
+
+        hits = _rate_hits[(endpoint, viewer)]
+        while hits and hits[0] <= now - RATE_LIMIT_WINDOW:
+            hits.popleft()
+
+        if len(hits) >= limit:
+            return max(1, int(hits[0] + RATE_LIMIT_WINDOW - now))
+
+        hits.append(now)
+        return None
+
+@app.before_request
+def enforce_rate_limit():
+    # CSRF kancasından sonra çalışıyor: sahte istek kurbanın kotasını yakmasın.
+    if request.method in SAFE_METHODS or request.endpoint not in RATE_LIMITS:
+        return None
+
+    retry_after = rate_limit_retry_after(request.endpoint, viewer_id(request.remote_addr))
+    if retry_after is None:
+        return None
+
+    message = f"Çok fazla istek. {retry_after} saniye sonra tekrar deneyin."
+    if request.endpoint == "like":
+        response = jsonify({"error": message})
+    else:
+        response = app.make_response(message)
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 def normalize_video(video):
     # Eski kayıtlarda eksik alanları tamamlar ve düz IP kalıntılarını siler.

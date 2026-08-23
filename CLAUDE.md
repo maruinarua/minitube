@@ -105,8 +105,11 @@ versa, without being asked.
 `/upload` requires a file, a non-empty filename, a non-empty title, and an
 extension in `ALLOWED_EXTENSIONS`. Rejections now report back: the handler
 calls `flash()` and `index.html` renders the messages. `/comment` still drops
-empty comments silently. Comment text is truncated to `MAX_COMMENT_LENGTH`
-(1000) rather than rejected.
+empty comments silently. Both user-supplied strings are truncated rather than
+rejected: comment text to `MAX_COMMENT_LENGTH` (1000) and the title to
+`MAX_TITLE_LENGTH` (200). Truncation applies on the way in only — existing
+records with longer titles are left as they are, since silently shortening
+stored content is not worth it for a storage concern.
 
 **CSRF.** All three POST routes require a token before the handler runs.
 `csrf_token()` puts one token per session in the signed cookie; forms carry it
@@ -152,7 +155,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 77 tests, stdlib only
+python -m unittest -v          # 85 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it

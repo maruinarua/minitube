@@ -640,6 +640,65 @@ class SecurityHeaderTests(MiniTubeTest):
         self.assertEqual(self.directive("form-action"), "form-action 'self'")
 
 
+class TitleLengthTests(MiniTubeTest):
+    """Başlık, yorum metni gibi kırpılmalı."""
+
+    def stored_title(self):
+        return self.stored()[-1]["title"]
+
+    def test_long_title_is_truncated(self):
+        self.upload("clip.mp4", title="b" * 5000)
+        self.assertEqual(len(self.stored_title()), self.module.MAX_TITLE_LENGTH)
+
+    def test_title_at_the_limit_is_untouched(self):
+        exact = "c" * self.module.MAX_TITLE_LENGTH
+        self.upload("clip.mp4", title=exact)
+        self.assertEqual(self.stored_title(), exact)
+
+    def test_short_title_is_untouched(self):
+        self.upload("clip.mp4", title="Tatil videosu")
+        self.assertEqual(self.stored_title(), "Tatil videosu")
+
+    def test_truncation_leaves_no_trailing_space(self):
+        # Kesme noktası boşluğa denk gelirse sonda boşluk kalmasın
+        title = ("kelime " * 100)
+        self.upload("clip.mp4", title=title)
+        stored = self.stored_title()
+        self.assertEqual(stored, stored.rstrip())
+        self.assertLessEqual(len(stored), self.module.MAX_TITLE_LENGTH)
+
+    def test_whitespace_only_title_is_still_rejected(self):
+        self.upload("clip.mp4", title="   ")
+        self.assertEqual(self.stored(), [])
+
+    def test_long_title_is_still_escaped_when_rendered(self):
+        # Kırpma, kaçışı bozmamalı
+        self.upload("clip.mp4", title="<script>alert(1)</script>" + "d" * 500)
+        name = self.stored()[-1]["filename"]
+        for path in ("/", f"/watch/{name}"):
+            with self.subTest(path=path):
+                body = self.client.get(path).get_data(as_text=True)
+                self.assertNotIn("<script>alert(1)</script>", body)
+                self.assertIn("&lt;script&gt;", body)
+
+    def test_existing_long_titles_are_left_alone(self):
+        # Mevcut kayıtları sessizce kısaltmıyoruz; kırpma yalnızca girişte
+        long_title = "e" * 3000
+        self.write_videos([{
+            "title": long_title, "filename": "eski.mp4", "views": 0,
+            "likes": 0, "liked_by": [], "comments": [],
+        }])
+        self.client.get("/")
+        self.assertEqual(self.stored()[0]["title"], long_title)
+
+    def test_comment_cap_is_unchanged(self):
+        name = self.upload_video("clip.mp4")
+        self.post_form(f"/comment/{name}", data={"comment": "f" * 5000})
+        self.assertEqual(
+            len(self.stored()[0]["comments"][0]["text"]), self.module.MAX_COMMENT_LENGTH
+        )
+
+
 class PrivacyTests(MiniTubeTest):
 
     def test_comment_does_not_store_ip(self):

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash
+from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import hashlib
@@ -28,6 +28,13 @@ MAX_COMMENT_LENGTH = 1000
 
 # Dosya sistemi ad sınırı (NAME_MAX). Aşılırsa file.save() OSError verir.
 MAX_FILENAME_LENGTH = 255
+
+# Tarayıcı çerezi başka sitelerden gelen POST'lara eklemesin. Token asıl
+# koruma; bu ikinci katman.
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# Token gerektirmeyen, durum değiştirmeyen yöntemler
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -72,6 +79,34 @@ def is_viewer_id(value):
 
 def debug_enabled():
     return os.environ.get("FLASK_DEBUG", "0") == "1"
+
+def csrf_token():
+    # Oturum başına tek token. Formlara gizli alan, fetch'e X-CSRF-Token
+    # başlığı olarak gidiyor. Çerez imzalı olduğu için istemci uyduramaz.
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_urlsafe(32)
+    return session["csrf_token"]
+
+@app.before_request
+def verify_csrf():
+    # Varsayılan kapalı: durum değiştiren her istek token istiyor, böylece
+    # ileride eklenen bir POST rotası kendiliğinden korunmuş oluyor.
+    if request.method in SAFE_METHODS:
+        return None
+
+    expected = session.get("csrf_token", "")
+    sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
+
+    # compare_digest str verilirse ASCII dışı girdide TypeError atıyor;
+    # bayta çevirip hem bunu hem zamanlama sızıntısını kapatıyoruz.
+    if expected and hmac.compare_digest(
+        sent.encode("utf-8", "replace"), expected.encode("utf-8")
+    ):
+        return None
+
+    if request.endpoint == "like":
+        return jsonify({"error": "Geçersiz veya eksik CSRF anahtarı"}), 403
+    return "Geçersiz veya eksik CSRF anahtarı", 403
 
 def normalize_video(video):
     # Eski kayıtlarda eksik alanları tamamlar ve düz IP kalıntılarını siler.
@@ -180,6 +215,7 @@ def inject_limits():
     return {
         "max_upload_mb": MAX_UPLOAD_MB,
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
+        "csrf_token": csrf_token(),
     }
 
 @app.route("/")

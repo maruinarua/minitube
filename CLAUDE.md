@@ -108,6 +108,13 @@ calls `flash()` and `index.html` renders the messages. `/comment` still drops
 empty comments silently. Comment text is truncated to `MAX_COMMENT_LENGTH`
 (1000) rather than rejected.
 
+**CSRF.** All three POST routes require a token before the handler runs.
+`csrf_token()` puts one token per session in the signed cookie; forms carry it
+as a hidden `csrf_token` field and `watch.html` reads it from a
+`<meta name="csrf-token">` tag for the `fetch()` on `/like`. A missing or wrong
+token is a 403 — JSON on `/like`, plain text elsewhere, matching how the 404s
+are split.
+
 **Upload naming.** `build_safe_filename()` is the only place a stored filename
 is produced. It runs `secure_filename` (kills `../` traversal), enforces the
 extension allowlist, and appends a short uuid so same-named uploads can't
@@ -141,7 +148,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 28 tests, stdlib only
+python -m unittest -v          # 59 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -176,6 +183,11 @@ These are handled — don't regress them:
 - The server binds to localhost and runs with debug off unless `HOST` /
   `FLASK_DEBUG` say otherwise.
 - Every response carries `X-Content-Type-Options: nosniff` (`add_security_headers`).
+- Every non-GET request needs a valid CSRF token (`verify_csrf`, a
+  `before_request` hook). It fails closed, so a new POST route is protected
+  without extra work — but it also means any new form needs the hidden
+  `csrf_token` field and any new `fetch()` needs the `X-CSRF-Token` header.
+  The session cookie is `SameSite=Lax` as a second layer.
 - Templates rely on Jinja autoescaping for titles and comment text — no `|safe`.
 - Client IPs are never persisted. Likes store `viewer_id()` (keyed HMAC);
   comments store no identifier. `normalize_video()` scrubs legacy plain IPs on

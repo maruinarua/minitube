@@ -8,6 +8,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -55,6 +56,9 @@ class MiniTubeTest(unittest.TestCase):
         sys.modules.pop("app", None)
         self.module = importlib.import_module("app")
         self.client = self.module.app.test_client()
+        # Token'ı bir kez alıp saklıyoruz: her POST'tan önce GET yapmak
+        # bozuk-veri testlerinde ana sayfayı da patlatırdı.
+        self.token = self.fetch_csrf_token()
 
     def tearDown(self):
         os.chdir(self._cwd)
@@ -66,10 +70,35 @@ class MiniTubeTest(unittest.TestCase):
 
     # yardımcılar
 
+    def fetch_csrf_token(self, client=None):
+        """Ana sayfayı çekip formdaki gizli token alanını okur."""
+        client = client or self.client
+        page = client.get("/").get_data(as_text=True)
+        match = re.search(r'name="csrf_token" value="([^"]+)"', page)
+        if match is None:
+            raise AssertionError("ana sayfada csrf_token alanı bulunamadı")
+        return match.group(1)
+
+    def post_form(self, path, data=None, **kwargs):
+        """Form POST'u; CSRF anahtarını otomatik ekler."""
+        payload = dict(data or {})
+        payload.setdefault("csrf_token", self.token)
+        return self.client.post(path, data=payload, **kwargs)
+
+    def post_json(self, path, **kwargs):
+        """JSON uçlarına POST; anahtarı başlıkla gönderir."""
+        headers = dict(kwargs.pop("headers", {}))
+        headers.setdefault("X-CSRF-Token", self.token)
+        return self.client.post(path, headers=headers, **kwargs)
+
     def upload(self, filename, data=b"VIDEO-BYTES", title="Test"):
         return self.client.post(
             "/upload",
-            data={"title": title, "video": (io.BytesIO(data), filename)},
+            data={
+                "title": title,
+                "video": (io.BytesIO(data), filename),
+                "csrf_token": self.token,
+            },
             content_type="multipart/form-data",
             follow_redirects=True,
         )
@@ -233,7 +262,7 @@ class UploadValidationTests(MiniTubeTest):
     def test_missing_file_field_is_rejected_without_error(self):
         response = self.client.post(
             "/upload",
-            data={"title": "T"},
+            data={"title": "T", "csrf_token": self.token},
             content_type="multipart/form-data",
             follow_redirects=True,
         )
@@ -271,19 +300,141 @@ class UploadValidationTests(MiniTubeTest):
         # Yetkilendirme katmanı yok: kimlik bilgisi taşımayan istemci de
         # yükleyebiliyor. Tasarım kararı, ama testte görünür olsun.
         anonymous = self.module.app.test_client()
+        token = self.fetch_csrf_token(anonymous)
         anonymous.post(
             "/upload",
-            data={"title": "anon", "video": (io.BytesIO(b"VID"), "anon.mp4")},
+            data={
+                "title": "anon",
+                "video": (io.BytesIO(b"VID"), "anon.mp4"),
+                "csrf_token": token,
+            },
             content_type="multipart/form-data",
         )
         self.assertEqual(len(self.stored()), 1)
+
+
+class CsrfTests(MiniTubeTest):
+    """Durum değiştiren uçlar geçerli token olmadan çalışmamalı."""
+
+    def prepare_video(self):
+        return self.upload_video("clip.mp4")
+
+    # --- token yoksa reddedilmeli ---
+
+    def test_upload_without_token_is_rejected(self):
+        response = self.client.post(
+            "/upload",
+            data={"title": "T", "video": (io.BytesIO(b"VID"), "clip.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.stored(), [])
+        self.assertEqual(self.uploads_dir(), [])
+
+    def test_comment_without_token_is_rejected(self):
+        name = self.prepare_video()
+        response = self.client.post(f"/comment/{name}", data={"comment": "sızdı"})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.stored()[0]["comments"], [])
+
+    def test_like_without_token_is_rejected_as_json(self):
+        name = self.prepare_video()
+        response = self.client.post(f"/like/{name}")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.get_json())
+        self.assertEqual(self.stored()[0]["likes"], 0)
+
+    # --- yanlış token da reddedilmeli ---
+
+    def test_wrong_token_is_rejected(self):
+        name = self.prepare_video()
+        response = self.client.post(
+            f"/comment/{name}", data={"comment": "x", "csrf_token": "yanlis-anahtar"}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.stored()[0]["comments"], [])
+
+    def test_token_from_another_session_is_rejected(self):
+        name = self.prepare_video()
+        other = self.module.app.test_client()
+        other_token = self.fetch_csrf_token(other)
+        self.assertNotEqual(other_token, self.token)
+
+        response = self.client.post(
+            f"/comment/{name}", data={"comment": "x", "csrf_token": other_token}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.stored()[0]["comments"], [])
+
+    def test_non_ascii_token_is_rejected_without_crashing(self):
+        # compare_digest str ile ASCII dışı girdide TypeError atar; 500 değil
+        # 403 dönmeli.
+        name = self.prepare_video()
+        response = self.client.post(
+            f"/comment/{name}", data={"comment": "x", "csrf_token": "çünkü-ünlü"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_cross_origin_post_without_token_is_rejected(self):
+        # Denetimde bu tam olarak çalışıyordu: yabancı Origin ile beğeni
+        name = self.prepare_video()
+        response = self.client.post(
+            f"/like/{name}", headers={"Origin": "https://kotu-site.example"}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.stored()[0]["likes"], 0)
+
+    # --- geçerli token ile normal akış ---
+
+    def test_valid_token_allows_all_state_changes(self):
+        name = self.prepare_video()
+        self.assertEqual(self.post_json(f"/like/{name}").status_code, 200)
+        self.assertEqual(self.post_form(f"/comment/{name}", data={"comment": "selam"}).status_code, 302)
+
+        record = self.stored()[0]
+        self.assertEqual(record["likes"], 1)
+        self.assertEqual(record["comments"][0]["text"], "selam")
+
+    def test_get_requests_are_unaffected(self):
+        name = self.prepare_video()
+        for path in ("/", f"/watch/{name}", f"/uploads/{name}"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                response.close()
+
+    # --- token sayfalara gömülüyor mu ---
+
+    def test_forms_carry_the_token(self):
+        name = self.prepare_video()
+        home = self.client.get("/").get_data(as_text=True)
+        self.assertIn('name="csrf_token"', home)
+
+        watch = self.client.get(f"/watch/{name}").get_data(as_text=True)
+        self.assertIn('name="csrf_token"', watch)
+        self.assertIn('name="csrf-token"', watch)      # fetch için meta etiketi
+
+    def test_token_is_not_embedded_in_javascript_string(self):
+        # Meta etiketinden okunuyor; JS bağlamına gömülmüyor
+        name = self.prepare_video()
+        watch = self.client.get(f"/watch/{name}").get_data(as_text=True)
+        script = watch.split("<script>")[1]
+        self.assertNotIn(self.token, script)
+        self.assertIn("X-CSRF-Token", script)
+
+    def test_session_cookie_is_samesite_lax(self):
+        self.assertEqual(self.module.app.config["SESSION_COOKIE_SAMESITE"], "Lax")
+        response = self.client.get("/")
+        cookies = response.headers.getlist("Set-Cookie")
+        if cookies:
+            self.assertTrue(any("SameSite=Lax" in c for c in cookies), cookies)
 
 
 class PrivacyTests(MiniTubeTest):
 
     def test_comment_does_not_store_ip(self):
         name = self.upload_video()
-        self.client.post(f"/comment/{name}", data={"comment": "merhaba"})
+        self.post_form(f"/comment/{name}", data={"comment": "merhaba"})
 
         comment = self.stored()[0]["comments"][0]
         self.assertNotIn("ip", comment)
@@ -292,7 +443,7 @@ class PrivacyTests(MiniTubeTest):
 
     def test_like_stores_hash_not_raw_ip(self):
         name = self.upload_video()
-        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "203.0.113.9"})
+        self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "203.0.113.9"})
 
         liked_by = self.stored()[0]["liked_by"]
         self.assertEqual(len(liked_by), 1)
@@ -331,7 +482,7 @@ class PrivacyTests(MiniTubeTest):
             "title": "eski", "filename": "old.mp4", "views": 0, "likes": 1,
             "liked_by": ["127.0.0.1"], "comments": [],
         }])
-        response = self.client.post("/like/old.mp4", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        response = self.post_json("/like/old.mp4", environ_base={"REMOTE_ADDR": "127.0.0.1"})
         self.assertEqual(response.get_json(), {"likes": 0, "liked": False})
 
 
@@ -339,15 +490,15 @@ class BehaviourTests(MiniTubeTest):
 
     def test_like_toggles_both_ways(self):
         name = self.upload_video()
-        first = self.client.post(f"/like/{name}").get_json()
-        second = self.client.post(f"/like/{name}").get_json()
+        first = self.post_json(f"/like/{name}").get_json()
+        second = self.post_json(f"/like/{name}").get_json()
         self.assertEqual(first, {"likes": 1, "liked": True})
         self.assertEqual(second, {"likes": 0, "liked": False})
 
     def test_separate_viewers_like_independently(self):
         name = self.upload_video()
-        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.1"})
-        self.client.post(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.2"})
+        self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.2"})
         self.assertEqual(self.stored()[0]["likes"], 2)
 
     def test_watch_counts_views_and_serves_file(self):
@@ -376,17 +527,17 @@ class BehaviourTests(MiniTubeTest):
 
     def test_comment_is_capped_and_escaped(self):
         name = self.upload_video()
-        self.client.post(f"/comment/{name}", data={"comment": "a" * 5000})
+        self.post_form(f"/comment/{name}", data={"comment": "a" * 5000})
         self.assertEqual(len(self.stored()[0]["comments"][0]["text"]),
                          self.module.MAX_COMMENT_LENGTH)
 
-        self.client.post(f"/comment/{name}", data={"comment": "<script>alert(1)</script>"})
+        self.post_form(f"/comment/{name}", data={"comment": "<script>alert(1)</script>"})
         page = self.client.get(f"/watch/{name}").get_data(as_text=True)
         self.assertNotIn("<script>alert(1)</script>", page)
 
     def test_empty_comment_is_ignored(self):
         name = self.upload_video()
-        self.client.post(f"/comment/{name}", data={"comment": "   "})
+        self.post_form(f"/comment/{name}", data={"comment": "   "})
         self.assertEqual(self.stored()[0]["comments"], [])
 
 

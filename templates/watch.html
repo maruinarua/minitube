@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <title>{{ video.title }} - MiniTube</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -126,6 +127,7 @@
         <h3>💬 Yorumlar ({{ video.comments|length if video.comments else 0 }})</h3>
 
         <form class="comment-form" action="/comment/{{ video.filename }}" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <textarea name="comment" placeholder="Yorumunu yaz..." required></textarea>
             <button type="submit">Gönder</button>
         </form>
@@ -145,8 +147,11 @@
     <script>
         async function likeVideo() {
             const btn = document.getElementById("likeBtn");
+            // Token'ı meta etiketinden okuyoruz; JS string'ine gömmüyoruz
+            const token = document.querySelector('meta[name="csrf-token"]').content;
             const res = await fetch("/like/{{ video.filename }}", {
-                method: "POST"
+                method: "POST",
+                headers: { "X-CSRF-Token": token }
             });
             const data = await res.json();
 

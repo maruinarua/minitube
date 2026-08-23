@@ -26,6 +26,9 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 MAX_COMMENT_LENGTH = 1000
 
+# Dosya sistemi ad sınırı (NAME_MAX). Aşılırsa file.save() OSError verir.
+MAX_FILENAME_LENGTH = 255
+
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
@@ -163,7 +166,14 @@ def build_safe_filename(original_name):
     if not base:
         base = "video"
 
-    return f"{base}-{uuid.uuid4().hex[:8]}{ext}"
+    # Uzun adı kısaltıyoruz: NAME_MAX aşılırsa file.save() OSError ile
+    # patlıyor ve istek 500 dönüyordu. Benzersizliği uuid eki sağladığı için
+    # tabanı kırpmak güvenli. secure_filename yalnızca ASCII ürettiğinden
+    # karakter sayısı bayt sayısına eşit.
+    suffix = f"-{uuid.uuid4().hex[:8]}{ext}"
+    base = base[:MAX_FILENAME_LENGTH - len(suffix)] or "video"
+
+    return f"{base}{suffix}"
 
 @app.context_processor
 def inject_limits():
@@ -192,18 +202,30 @@ def upload():
         flash("Desteklenmeyen dosya türü. İzin verilenler: " + ", ".join(sorted(ALLOWED_EXTENSIONS)))
         return redirect("/")
 
-    file.save(os.path.join(UPLOAD_FOLDER, filename))
+    saved_path = os.path.join(UPLOAD_FOLDER, filename)
 
-    videos = load_videos()
-    videos.append({
-        "title": title,
-        "filename": filename,
-        "views": 0,
-        "likes": 0,
-        "liked_by": [],
-        "comments": []
-    })
-    save_videos(videos)
+    # Dosya diske yazıldıktan sonra kayıt yazımı patlarsa (disk dolu, bozuk
+    # videos.json) dosya erişilemez halde diskte kalırdı. Kayıt tamamlanamazsa
+    # dosyayı da geri alıyoruz; başarılı akış aynen eskisi gibi.
+    try:
+        file.save(saved_path)
+
+        videos = load_videos()
+        videos.append({
+            "title": title,
+            "filename": filename,
+            "views": 0,
+            "likes": 0,
+            "liked_by": [],
+            "comments": []
+        })
+        save_videos(videos)
+    except BaseException:
+        try:
+            os.remove(saved_path)
+        except OSError:
+            pass
+        raise
 
     flash("Video yüklendi.")
     return redirect("/")

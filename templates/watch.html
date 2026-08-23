@@ -101,6 +101,23 @@
             font-size: 0.95rem;
             margin-top: 10px;
         }
+        .inline-form { display: inline; }
+        .delete-btn {
+            background: #6b1f1f;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            margin-left: 8px;
+        }
+        .delete-btn:hover { background: #8b2020; }
+        .comment .row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
     </style>
 </head>
 <body>
@@ -120,6 +137,13 @@
         <button id="likeBtn" class="{{ 'liked' if already_liked else '' }}">
             ❤️ <span id="likeCount">{{ video.likes }}</span> Beğeni
         </button>
+
+        {% if is_admin %}
+        <form action="/admin/delete/{{ video.filename }}" method="POST" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="delete-btn">Videoyu sil</button>
+        </form>
+        {% endif %}
     </div>
 
     <!-- YORUMLAR -->
@@ -134,8 +158,18 @@
 
         {% if video.comments %}
             {% for c in video.comments|reverse %}
+            {% set real_index = video.comments|length - loop.index0 - 1 %}
             <div class="comment">
-                <div class="time">{{ c.time }}</div>
+                <div class="row">
+                    <div class="time">{{ c.time }}</div>
+                    {% if is_admin %}
+                    <form action="/admin/delete-comment/{{ video.filename }}/{{ real_index }}"
+                          method="POST" class="inline-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="delete-btn">Sil</button>
+                    </form>
+                    {% endif %}
+                </div>
                 <div class="text">{{ c.text }}</div>
             </div>
             {% endfor %}

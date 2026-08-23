@@ -47,7 +47,13 @@ RATE_LIMITS = {
     "upload": int(os.environ.get("RATE_LIMIT_UPLOAD", "10")),
     "comment": int(os.environ.get("RATE_LIMIT_COMMENT", "30")),
     "like": int(os.environ.get("RATE_LIMIT_LIKE", "60")),
+    # Anahtarın kaba kuvvetle denenmesini engelliyor
+    "admin_login": int(os.environ.get("RATE_LIMIT_ADMIN_LOGIN", "5")),
 }
+
+# Moderasyon anahtarı. Tanımlı değilse yönetici yolu tamamen kapalı; boş
+# anahtarla herkesin silebilmesi kabul edilemez.
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 # Süresi geçmiş kayıtları ne sıklıkla süpüreceğimiz
 RATE_SWEEP_INTERVAL = 300
@@ -118,6 +124,20 @@ def csrf_token():
     if "csrf_token" not in session:
         session["csrf_token"] = secrets.token_urlsafe(32)
     return session["csrf_token"]
+
+def admin_enabled():
+    return bool(ADMIN_KEY)
+
+def is_admin():
+    # Bayrak imzalı çerezde duruyor, istemci uyduramaz. ADMIN_KEY sonradan
+    # kaldırılırsa eski oturumlar da yetkisini kaybeder.
+    return admin_enabled() and session.get("is_admin", False)
+
+def require_admin():
+    """Yetki yoksa yanıt döner, varsa None."""
+    if not is_admin():
+        return "Yetkiniz yok", 403
+    return None
 
 def csp_nonce():
     # İstek başına tek nonce. Şablondaki <style>/<script> ile CSP başlığı
@@ -323,6 +343,8 @@ def inject_limits():
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
         "csrf_token": csrf_token(),
         "csp_nonce": csp_nonce(),
+        "admin_enabled": admin_enabled(),
+        "is_admin": is_admin(),
     }
 
 @app.route("/")
@@ -458,6 +480,81 @@ def comment(filename):
             break
 
     return redirect(f"/watch/{filename}")
+
+def remove_upload(filename):
+    """uploads/ içindeki dosyayı siler. Dizin dışına çıkan yolu reddeder."""
+    root = os.path.abspath(UPLOAD_FOLDER)
+    target = os.path.abspath(os.path.join(UPLOAD_FOLDER, filename))
+
+    # Ad kayıttan geliyor ama yine de doğruluyoruz: elle düzenlenmiş bir
+    # videos.json silmeyi uploads/ dışına taşıyabilirdi.
+    if os.path.commonpath([root, target]) != root or target == root:
+        return False
+
+    try:
+        os.remove(target)
+        return True
+    except OSError:
+        return False
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    if not admin_enabled():
+        flash("Yönetici anahtarı tanımlı değil.")
+        return redirect("/")
+
+    supplied = request.form.get("admin_key", "")
+    if hmac.compare_digest(
+        supplied.encode("utf-8", "replace"), ADMIN_KEY.encode("utf-8")
+    ):
+        session["is_admin"] = True
+        flash("Yönetici olarak giriş yapıldı.")
+    else:
+        flash("Anahtar hatalı.")
+
+    return redirect("/")
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("is_admin", None)
+    flash("Yönetici oturumu kapatıldı.")
+    return redirect("/")
+
+@app.route("/admin/delete/<filename>", methods=["POST"])
+def admin_delete(filename):
+    denied = require_admin()
+    if denied:
+        return denied
+
+    videos = load_videos()
+
+    for index, video in enumerate(videos):
+        if video["filename"] == filename:
+            del videos[index]
+            save_videos(videos)
+            remove_upload(filename)
+            flash("Video silindi.")
+            return redirect("/")
+
+    return "Video bulunamadı", 404
+
+@app.route("/admin/delete-comment/<filename>/<int:index>", methods=["POST"])
+def admin_delete_comment(filename, index):
+    denied = require_admin()
+    if denied:
+        return denied
+
+    videos = load_videos()
+
+    for video in videos:
+        if video["filename"] == filename:
+            if 0 <= index < len(video["comments"]):
+                del video["comments"][index]
+                save_videos(videos)
+                flash("Yorum silindi.")
+            return redirect(f"/watch/{filename}")
+
+    return "Video bulunamadı", 404
 
 @app.route("/uploads/<filename>")
 def uploaded_file(filename):

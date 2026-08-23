@@ -699,6 +699,84 @@ class TitleLengthTests(MiniTubeTest):
         )
 
 
+class KeySeparationTests(MiniTubeTest):
+    """Oturum imzası ve kimlik karması ayrı anahtar kullanmalı."""
+
+    def test_purposes_use_different_keys(self):
+        self.assertNotEqual(self.module.SESSION_KEY, self.module.VIEWER_KEY)
+
+    def test_neither_subkey_is_the_root_key(self):
+        root = self.module.SECRET_KEY
+        self.assertNotEqual(self.module.SESSION_KEY, root)
+        self.assertNotEqual(self.module.VIEWER_KEY, root)
+
+    def test_session_is_signed_with_the_session_key(self):
+        self.assertEqual(self.module.app.secret_key, self.module.SESSION_KEY)
+
+    def test_derivation_is_deterministic(self):
+        # Beğeniler yeniden başlatmayı atlatmalı: aynı kök aynı alt anahtarı vermeli
+        again = self.module.derive_key("viewer-id")
+        self.assertEqual(again, self.module.VIEWER_KEY)
+
+    def test_different_purposes_diverge(self):
+        self.assertNotEqual(
+            self.module.derive_key("session"), self.module.derive_key("viewer-id")
+        )
+
+    def test_subkeys_change_with_the_root(self):
+        os.environ["SECRET_KEY"] = "bambaska-bir-kok"
+        sys.modules.pop("app", None)
+        other = importlib.import_module("app")
+        self.assertNotEqual(other.VIEWER_KEY, self.module.VIEWER_KEY)
+
+    def test_session_still_works_with_derived_key(self):
+        # Flash ve CSRF imzalı çereze bağlı; türetilmiş anahtarla da çalışmalı.
+        # upload() yönlendirmeyi takip ettiği için mesaj bu yanıtta görünüyor.
+        response = self.upload("bostitle.mp4", title="")
+        self.assertIn("zorunlu", response.get_data(as_text=True))
+
+
+class LegacyViewerIdTests(MiniTubeTest):
+    """Eski şemayla kaydedilmiş beğeniler kopmamalı."""
+
+    def seed_with_legacy_like(self):
+        legacy = self.module.legacy_viewer_id("127.0.0.1")
+        self.write_videos([{
+            "title": "eski", "filename": "eski.mp4", "views": 0,
+            "likes": 1, "liked_by": [legacy], "comments": [],
+        }])
+        return legacy
+
+    def test_new_scheme_differs_from_the_old_one(self):
+        self.assertNotEqual(
+            self.module.viewer_id("127.0.0.1"), self.module.legacy_viewer_id("127.0.0.1")
+        )
+
+    def test_legacy_like_is_recognised_as_already_liked(self):
+        self.seed_with_legacy_like()
+        page = self.client.get("/watch/eski.mp4").get_data(as_text=True)
+        self.assertIn('id="likeBtn" class="liked"', page)
+
+    def test_legacy_like_can_be_undone(self):
+        self.seed_with_legacy_like()
+        response = self.post_json("/like/eski.mp4")
+        self.assertEqual(response.get_json(), {"likes": 0, "liked": False})
+        self.assertEqual(self.stored()[0]["liked_by"], [])
+
+    def test_legacy_like_is_not_double_counted(self):
+        # Eski kimlik tanınmasa beğeni 1'den 2'ye çıkardı
+        self.seed_with_legacy_like()
+        self.post_json("/like/eski.mp4")
+        self.assertEqual(self.stored()[0]["likes"], 0)
+
+    def test_new_likes_are_stored_with_the_new_scheme(self):
+        name = self.upload_video("yeni.mp4")
+        self.post_json(f"/like/{name}")
+        stored = self.stored()[-1]["liked_by"]
+        self.assertEqual(stored, [self.module.viewer_id("127.0.0.1")])
+        self.assertNotIn(self.module.legacy_viewer_id("127.0.0.1"), stored)
+
+
 class PrivacyTests(MiniTubeTest):
 
     def test_comment_does_not_store_ip(self):

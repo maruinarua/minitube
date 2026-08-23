@@ -79,11 +79,27 @@ def load_secret_key():
     return generated
 
 SECRET_KEY = load_secret_key()
-app.secret_key = SECRET_KEY
+
+def derive_key(purpose):
+    # Kök anahtarı doğrudan kullanmak yerine amaç başına ayrı alt anahtar
+    # türetiyoruz. Biri sızarsa diğeri geri hesaplanamaz; HMAC tek yönlü.
+    return hmac.new(SECRET_KEY, purpose.encode(), hashlib.sha256).digest()
+
+SESSION_KEY = derive_key("session")
+VIEWER_KEY = derive_key("viewer-id")
+
+app.secret_key = SESSION_KEY
 
 def viewer_id(ip):
     # IP'yi düz metin saklamıyoruz. IPv4 uzayı küçük olduğu için düz karma
     # kırılabilirdi; gizli anahtarlı HMAC anahtar olmadan geri çevrilemez.
+    return hmac.new(VIEWER_KEY, (ip or "").encode(), hashlib.sha256).hexdigest()[:32]
+
+def legacy_viewer_id(ip):
+    # Alt anahtar türetmeden önce kimlik doğrudan SECRET_KEY ile üretiliyordu.
+    # Kayıtlı karmalar geri çevrilemediği için yeniden hesaplanamıyorlar; eski
+    # beğeniler kopmasın diye bu şemayı okurken de tanıyoruz.
+    # Eski kayıtlar tükendiğinde bu fonksiyon ve çağrıları silinebilir.
     return hmac.new(SECRET_KEY, (ip or "").encode(), hashlib.sha256).hexdigest()[:32]
 
 def is_viewer_id(value):
@@ -372,6 +388,7 @@ def upload_too_large(error):
 def watch(filename):
     videos = load_videos()
     viewer = viewer_id(request.remote_addr)
+    legacy = legacy_viewer_id(request.remote_addr)
 
     for video in videos:
         if video["filename"] == filename:
@@ -381,7 +398,7 @@ def watch(filename):
             return render_template(
                 "watch.html",
                 video=video,
-                already_liked=viewer in video["liked_by"],
+                already_liked=viewer in video["liked_by"] or legacy in video["liked_by"],
                 video_mimetype=mimetypes.guess_type(filename)[0] or "video/mp4"
             )
 
@@ -391,11 +408,17 @@ def watch(filename):
 def like(filename):
     videos = load_videos()
     viewer = viewer_id(request.remote_addr)
+    legacy = legacy_viewer_id(request.remote_addr)
 
     for video in videos:
         if video["filename"] == filename:
-            if viewer in video["liked_by"]:
-                video["liked_by"].remove(viewer)
+            # Eski şemayla kaydedilmiş beğeni de geri alınabilmeli
+            existing = viewer if viewer in video["liked_by"] else (
+                legacy if legacy in video["liked_by"] else None
+            )
+
+            if existing is not None:
+                video["liked_by"].remove(existing)
                 video["likes"] -= 1
                 liked = False
             else:

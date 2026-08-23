@@ -152,7 +152,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 69 tests, stdlib only
+python -m unittest -v          # 77 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -174,6 +174,10 @@ or the data migration — those are the parts where a regression is silent.
 - Styling stays inline per template. Dark theme: background `#121212`, cards
   `#1e1e1e`, inputs `#2a2a2a`, accent red `#ff0000`, liked-state `#ff4757`,
   muted text `#aaa`.
+- Any inline `<style>` or `<script>` needs `nonce="{{ csp_nonce }}"` or CSP
+  blocks it. Inline event handlers (`onclick=`) cannot carry a nonce at all —
+  bind events inside the nonced script with `addEventListener`. A page that
+  suddenly renders unstyled is almost always a missing nonce.
 - Existing comments in `app.py` are Turkish. Follow the surrounding language
   when adding comments; the codebase is sparsely commented, so don't add many.
 
@@ -186,7 +190,12 @@ These are handled — don't regress them:
 - Uploads are size-capped via `MAX_CONTENT_LENGTH`, with a 413 handler.
 - The server binds to localhost and runs with debug off unless `HOST` /
   `FLASK_DEBUG` say otherwise.
-- Every response carries `X-Content-Type-Options: nosniff` (`add_security_headers`).
+- Every response carries `X-Content-Type-Options: nosniff`, a nonce-based
+  `Content-Security-Policy`, and `X-Frame-Options: DENY`
+  (`add_security_headers`). The CSP deliberately has **no** `'unsafe-inline'`:
+  with it, an injected script would run and the policy would be decoration.
+  `frame-ancestors 'none'` blocks clickjacking; `X-Frame-Options` is the
+  fallback for older browsers.
 - Every non-GET request needs a valid CSRF token (`verify_csrf`, a
   `before_request` hook). It fails closed, so a new POST route is protected
   without extra work — but it also means any new form needs the hidden

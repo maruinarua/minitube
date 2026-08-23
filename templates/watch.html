@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token }}">
     <title>{{ video.title }} - MiniTube</title>
-    <style>
+    <style nonce="{{ csp_nonce }}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             background: #121212;
@@ -117,7 +117,7 @@
             👁 {{ video.views }} görüntülenme
         </div>
 
-        <button id="likeBtn" class="{{ 'liked' if already_liked else '' }}" onclick="likeVideo()">
+        <button id="likeBtn" class="{{ 'liked' if already_liked else '' }}">
             ❤️ <span id="likeCount">{{ video.likes }}</span> Beğeni
         </button>
     </div>
@@ -144,7 +144,7 @@
         {% endif %}
     </div>
 
-    <script>
+    <script nonce="{{ csp_nonce }}">
         async function likeVideo() {
             const btn = document.getElementById("likeBtn");
             // Token'ı meta etiketinden okuyoruz; JS string'ine gömmüyoruz
@@ -164,6 +164,9 @@
                 }
             }
         }
+
+        // Satır içi onclick yerine: nonce'lu script bloğundan bağlıyoruz
+        document.getElementById("likeBtn").addEventListener("click", likeVideo);
     </script>
 </body>
 </html>

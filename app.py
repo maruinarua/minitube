@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session
+from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session, g
 from werkzeug.utils import secure_filename
 from collections import defaultdict, deque
 from datetime import datetime
@@ -101,6 +101,13 @@ def csrf_token():
     if "csrf_token" not in session:
         session["csrf_token"] = secrets.token_urlsafe(32)
     return session["csrf_token"]
+
+def csp_nonce():
+    # İstek başına tek nonce. Şablondaki <style>/<script> ile CSP başlığı
+    # aynı değeri kullanmak zorunda, o yüzden g üzerinde tutuluyor.
+    if not hasattr(g, "csp_nonce"):
+        g.csp_nonce = secrets.token_urlsafe(16)
+    return g.csp_nonce
 
 @app.before_request
 def verify_csrf():
@@ -298,6 +305,7 @@ def inject_limits():
         "max_upload_mb": MAX_UPLOAD_MB,
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
         "csrf_token": csrf_token(),
+        "csp_nonce": csp_nonce(),
     }
 
 @app.route("/")
@@ -429,8 +437,30 @@ def uploaded_file(filename):
 
 @app.after_request
 def add_security_headers(response):
-    # Tarayıcı, servis edilen dosyanın tipini tahmin etmeye çalışmasın.
+    # Tarayıcı, servis edilen dosyanın tipini tahmin etmeye çalışmasına izin verme
     response.headers["X-Content-Type-Options"] = "nosniff"
+
+    # Satır içi <style>/<script> nonce ile açılıyor; 'unsafe-inline'
+    # koysaydık enjekte edilen script de çalışırdı ve CSP'nin XSS'e karşı
+    # anlamı kalmazdı. Sayfada satır içi olay yakalayıcı (onclick) yok,
+    # çünkü onlar nonce alamaz.
+    nonce = csp_nonce()
+    response.headers["Content-Security-Policy"] = "; ".join([
+        "default-src 'self'",
+        f"script-src 'self' 'nonce-{nonce}'",
+        f"style-src 'self' 'nonce-{nonce}'",
+        "img-src 'self' data:",
+        "media-src 'self'",            # /uploads/ altındaki videolar
+        "connect-src 'self'",          # /like fetch'i
+        "form-action 'self'",
+        "frame-ancestors 'none'",      # clickjacking
+        "base-uri 'none'",
+        "object-src 'none'",
+    ])
+
+    # frame-ancestors'ı desteklemeyen eski tarayıcılar için
+    response.headers["X-Frame-Options"] = "DENY"
+
     return response
 
 if __name__ == "__main__":

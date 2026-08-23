@@ -418,7 +418,11 @@ class CsrfTests(MiniTubeTest):
         # Meta etiketinden okunuyor; JS bağlamına gömülmüyor
         name = self.prepare_video()
         watch = self.client.get(f"/watch/{name}").get_data(as_text=True)
-        script = watch.split("<script>")[1]
+        # Etiket artık nonce özniteliği taşıyor; içeriği öznitelikten
+        # bağımsız çıkarıyoruz
+        match = re.search(r"<script[^>]*>(.*?)</script>", watch, re.S)
+        self.assertIsNotNone(match, "watch sayfasında script bloğu yok")
+        script = match.group(1)
         self.assertNotIn(self.token, script)
         self.assertIn("X-CSRF-Token", script)
 
@@ -561,6 +565,79 @@ class RateLimitTests(MiniTubeTest):
         self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.2.1"})
 
         self.assertLess(len(self.module._rate_hits), 5, "eski kayıtlar süpürülmedi")
+
+
+class SecurityHeaderTests(MiniTubeTest):
+    """CSP ve çerçeveleme korumaları."""
+
+    def policy(self, path="/"):
+        response = self.client.get(path)
+        header = response.headers.get("Content-Security-Policy", "")
+        response.close()
+        return header
+
+    def directive(self, name, path="/"):
+        for part in self.policy(path).split(";"):
+            part = part.strip()
+            if part.split(" ")[0] == name:
+                return part
+        return None
+
+    def test_csp_is_sent_on_every_response(self):
+        name = self.upload_video("clip.mp4")
+        for path in ("/", f"/watch/{name}", f"/uploads/{name}"):
+            with self.subTest(path=path):
+                self.assertTrue(self.policy(path), f"{path} için CSP yok")
+
+    def test_framing_is_denied(self):
+        self.assertEqual(self.directive("frame-ancestors"), "frame-ancestors 'none'")
+        response = self.client.get("/")
+        self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+
+    def test_scripts_and_styles_use_a_nonce_not_unsafe_inline(self):
+        # 'unsafe-inline' olsaydı enjekte edilen script de çalışırdı ve
+        # CSP'nin XSS'e karşı bir anlamı kalmazdı
+        for name in ("script-src", "style-src"):
+            with self.subTest(directive=name):
+                value = self.directive(name)
+                self.assertIn("'nonce-", value)
+                self.assertNotIn("unsafe-inline", value)
+                self.assertNotIn("unsafe-eval", value)
+
+    def test_header_nonce_matches_the_rendered_page(self):
+        response = self.client.get("/")
+        body = response.get_data(as_text=True)
+        header = response.headers["Content-Security-Policy"]
+
+        rendered = re.search(r'<style nonce="([^"]+)"', body)
+        self.assertIsNotNone(rendered, "şablonda nonce yok")
+        self.assertIn(f"'nonce-{rendered.group(1)}'", header,
+                      "başlıktaki nonce sayfadakiyle uyuşmuyor")
+
+    def test_nonce_changes_between_requests(self):
+        first = re.search(r"'nonce-([^']+)'", self.policy()).group(1)
+        second = re.search(r"'nonce-([^']+)'", self.policy()).group(1)
+        self.assertNotEqual(first, second, "nonce sabit - tahmin edilebilir olurdu")
+
+    def test_templates_have_no_inline_event_handlers(self):
+        # Satır içi handler nonce alamaz, CSP tarafından bloklanır
+        name = self.upload_video("clip.mp4")
+        for path in ("/", f"/watch/{name}"):
+            with self.subTest(path=path):
+                body = self.client.get(path).get_data(as_text=True)
+                for attribute in ("onclick=", "onload=", "onerror=", "onsubmit="):
+                    self.assertNotIn(attribute, body)
+
+    def test_dangerous_sources_are_locked_down(self):
+        self.assertEqual(self.directive("object-src"), "object-src 'none'")
+        self.assertEqual(self.directive("base-uri"), "base-uri 'none'")
+        self.assertEqual(self.directive("default-src"), "default-src 'self'")
+
+    def test_video_and_fetch_sources_are_allowed(self):
+        # Politika kendi işlevselliğimizi kırmamalı
+        self.assertEqual(self.directive("media-src"), "media-src 'self'")
+        self.assertEqual(self.directive("connect-src"), "connect-src 'self'")
+        self.assertEqual(self.directive("form-action"), "form-action 'self'")
 
 
 class PrivacyTests(MiniTubeTest):

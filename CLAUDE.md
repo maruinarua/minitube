@@ -75,14 +75,25 @@ that migration in place; it is what keeps old files from reintroducing plain
 IPs.
 
 **Identity is a keyed hash of the client IP.** `viewer_id()` returns
-`HMAC-SHA256(SECRET_KEY, ip)` truncated to 32 hex chars, and only that value is
+`HMAC-SHA256(VIEWER_KEY, ip)` truncated to 32 hex chars, and only that value is
 persisted. A plain hash would not be enough — IPv4 is 2^32 values, so an
 unkeyed digest is brute-forceable; the key is what makes it irreversible.
 Comments store no identifier at all, since nothing ever read one.
 
-The key comes from `SECRET_KEY`, falling back to a generated `.secret_key`
-file. It must stay stable across restarts or existing likes stop matching their
-owners. Behind a reverse proxy every user still collapses to one address, so
+**Keys are derived per purpose.** `SECRET_KEY` (env, or the generated
+`.secret_key` file) is a root that is never used directly: `derive_key()` makes
+`SESSION_KEY` for signing the session cookie and `VIEWER_KEY` for `viewer_id()`.
+HMAC is one-way, so leaking one subkey does not expose the other or the root.
+Add new purposes with a new label rather than reusing an existing subkey.
+
+`legacy_viewer_id()` reproduces the older scheme, where identity was hashed with
+`SECRET_KEY` directly. Stored hashes cannot be recomputed — that is the point of
+hashing them — so `watch()` and `like()` accept either form and rewrite to the
+new one on the next toggle. Once old likes have aged out, that function and its
+two call sites can go.
+
+The root key must stay stable across restarts or existing likes stop matching
+their owners. Behind a reverse proxy every user still collapses to one address, so
 likes would be shared; that is a known limitation of the design, not a bug to
 patch silently.
 
@@ -155,7 +166,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 85 tests, stdlib only
+python -m unittest -v          # 97 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -216,6 +227,8 @@ These are handled — don't regress them:
   load — don't remove it, and don't add `request.remote_addr` to a stored
   record.
 - `.secret_key` is mode 600 and gitignored. Never commit it.
+- `SECRET_KEY` is a root key only. Sign or hash with a `derive_key()` subkey,
+  never with the root itself.
 
 ## Known sharp edges
 

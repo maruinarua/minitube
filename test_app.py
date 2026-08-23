@@ -46,6 +46,7 @@ class MiniTubeTest(unittest.TestCase):
         os.environ["SECRET_KEY"] = TEST_KEY
         os.environ.pop("FLASK_DEBUG", None)
         os.environ.pop("MAX_UPLOAD_MB", None)
+        os.environ.pop("ADMIN_KEY", None)
         os.environ.update(self.env)
 
         shutil.copy(os.path.join(REPO, "app.py"), os.path.join(self.tmp, "app.py"))
@@ -775,6 +776,187 @@ class LegacyViewerIdTests(MiniTubeTest):
         stored = self.stored()[-1]["liked_by"]
         self.assertEqual(stored, [self.module.viewer_id("127.0.0.1")])
         self.assertNotIn(self.module.legacy_viewer_id("127.0.0.1"), stored)
+
+
+class AdminDisabledTests(MiniTubeTest):
+    """ADMIN_KEY tanımlı değilse yönetici yolu tamamen kapalı olmalı."""
+
+    def test_admin_is_disabled_by_default(self):
+        self.assertFalse(self.module.admin_enabled())
+
+    def test_login_cannot_grant_admin(self):
+        self.post_form("/admin/login", data={"admin_key": ""})
+        self.post_form("/admin/login", data={"admin_key": "herhangi"})
+        name = self.upload_video("clip.mp4")
+        self.assertEqual(self.post_form(f"/admin/delete/{name}").status_code, 403)
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_login_form_is_not_rendered(self):
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn('name="admin_key"', page)
+
+
+class AdminModerationTests(MiniTubeTest):
+    env = {"ADMIN_KEY": "cok-gizli-anahtar"}
+
+    def login(self, key="cok-gizli-anahtar"):
+        return self.post_form("/admin/login", data={"admin_key": key},
+                              follow_redirects=True)
+
+    def upload_path(self, name):
+        return os.path.join(self.tmp, "uploads", name)
+
+    # --- yetkilendirme ---
+
+    def test_wrong_key_does_not_grant_admin(self):
+        self.login("yanlis")
+        name = self.upload_video("clip.mp4")
+        self.assertEqual(self.post_form(f"/admin/delete/{name}").status_code, 403)
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_non_ascii_key_does_not_crash(self):
+        response = self.login("çünkü-ünlü")
+        self.assertEqual(response.status_code, 200)
+        name = self.upload_video("clip.mp4")
+        self.assertEqual(self.post_form(f"/admin/delete/{name}").status_code, 403)
+
+    def test_correct_key_grants_admin(self):
+        self.login()
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Yönetici modu açık", page)
+
+    def test_logout_revokes_admin(self):
+        self.login()
+        self.post_form("/admin/logout")
+        name = self.upload_video("clip.mp4")
+        self.assertEqual(self.post_form(f"/admin/delete/{name}").status_code, 403)
+
+    def test_anonymous_client_cannot_delete(self):
+        name = self.upload_video("clip.mp4")
+        self.login()
+        # Giriş yapmamış ayrı bir istemci
+        other = self.module.app.test_client()
+        token = self.fetch_csrf_token(other)
+        response = other.post(f"/admin/delete/{name}", data={"csrf_token": token})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_delete_requires_csrf_token(self):
+        self.login()
+        name = self.upload_video("clip.mp4")
+        self.assertEqual(self.client.post(f"/admin/delete/{name}").status_code, 403)
+        self.assertEqual(len(self.stored()), 1)
+
+    # --- video silme ---
+
+    def test_admin_deletes_record_and_file(self):
+        name = self.upload_video("clip.mp4", data=b"VID")
+        self.assertTrue(os.path.exists(self.upload_path(name)))
+
+        self.login()
+        self.post_form(f"/admin/delete/{name}")
+
+        self.assertEqual(self.stored(), [])
+        self.assertFalse(os.path.exists(self.upload_path(name)), "dosya diskte kaldı")
+
+    def test_delete_only_removes_the_named_video(self):
+        first = self.upload_video("bir.mp4", title="bir")
+        second = self.upload_video("iki.mp4", title="iki")
+        self.login()
+        self.post_form(f"/admin/delete/{first}")
+
+        remaining = [v["filename"] for v in self.stored()]
+        self.assertEqual(remaining, [second])
+        self.assertTrue(os.path.exists(self.upload_path(second)))
+
+    def test_deleting_missing_video_is_404(self):
+        self.login()
+        self.assertEqual(self.post_form("/admin/delete/yok.mp4").status_code, 404)
+
+    def test_remove_upload_refuses_paths_outside_uploads(self):
+        # Elle düzenlenmiş bir kayıt silmeyi dizin dışına taşıyamamalı
+        outside = os.path.join(self.root, "kurban.txt")
+        with open(outside, "w") as f:
+            f.write("dokunma")
+
+        self.assertFalse(self.module.remove_upload("../kurban.txt"))
+        self.assertTrue(os.path.exists(outside))
+
+    # --- yorum silme ---
+
+    def test_admin_deletes_a_comment(self):
+        name = self.upload_video("clip.mp4")
+        for text in ("birinci", "ikinci", "ucuncu"):
+            self.post_form(f"/comment/{name}", data={"comment": text})
+
+        self.login()
+        self.post_form(f"/admin/delete-comment/{name}/1")
+
+        texts = [c["text"] for c in self.stored()[0]["comments"]]
+        self.assertEqual(texts, ["birinci", "ucuncu"])
+
+    def test_rendered_index_targets_the_displayed_comment(self):
+        # Şablon yorumları ters sırayla gösteriyor; formdaki indeks gerçek
+        # depolama indeksine denk gelmeli, yoksa yanlış yorum silinir.
+        name = self.upload_video("clip.mp4")
+        for text in ("eski", "yeni"):
+            self.post_form(f"/comment/{name}", data={"comment": text})
+
+        self.login()
+        page = self.client.get(f"/watch/{name}").get_data(as_text=True)
+        indexes = re.findall(rf"/admin/delete-comment/{re.escape(name)}/(\d+)", page)
+        self.assertEqual(indexes, ["1", "0"], "ters sıralamada indeks eşleşmiyor")
+
+        # İlk gösterilen (en yeni) silinince "eski" kalmalı
+        self.post_form(f"/admin/delete-comment/{name}/{indexes[0]}")
+        self.assertEqual([c["text"] for c in self.stored()[0]["comments"]], ["eski"])
+
+    def test_out_of_range_comment_index_is_ignored(self):
+        name = self.upload_video("clip.mp4")
+        self.post_form(f"/comment/{name}", data={"comment": "tek"})
+        self.login()
+
+        for index in (5, 99):
+            with self.subTest(index=index):
+                response = self.post_form(f"/admin/delete-comment/{name}/{index}")
+                self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(self.stored()[0]["comments"]), 1)
+
+    # --- arayüz ---
+
+    def test_delete_controls_only_render_for_admin(self):
+        name = self.upload_video("clip.mp4")
+        self.post_form(f"/comment/{name}", data={"comment": "yorum"})
+
+        anonymous = self.client.get(f"/watch/{name}").get_data(as_text=True)
+        self.assertNotIn("/admin/delete/", anonymous)
+        self.assertNotIn("/admin/delete-comment/", anonymous)
+
+        self.login()
+        as_admin = self.client.get(f"/watch/{name}").get_data(as_text=True)
+        self.assertIn(f"/admin/delete/{name}", as_admin)
+        self.assertIn("/admin/delete-comment/", as_admin)
+
+
+class AdminBruteForceTests(MiniTubeTest):
+    env = {"ADMIN_KEY": "cok-gizli-anahtar", "RATE_LIMIT_ADMIN_LOGIN": "3"}
+
+    def test_login_attempts_are_rate_limited(self):
+        for _ in range(3):
+            self.post_form("/admin/login", data={"admin_key": "yanlis"})
+
+        blocked = self.post_form("/admin/login", data={"admin_key": "yanlis"})
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_limit_blocks_the_correct_key_too(self):
+        # Sınıra takılan istemci doğru anahtarla da geçememeli
+        for _ in range(3):
+            self.post_form("/admin/login", data={"admin_key": "yanlis"})
+
+        self.assertEqual(
+            self.post_form("/admin/login", data={"admin_key": "cok-gizli-anahtar"}).status_code,
+            429,
+        )
 
 
 class PrivacyTests(MiniTubeTest):

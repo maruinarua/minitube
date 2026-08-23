@@ -7,8 +7,9 @@ Guidance for AI assistants working in this repository.
 MiniTube — a minimal YouTube-style video sharing app built with Flask. Users
 upload a video with a title, watch it, like it (one like per IP, toggleable),
 and leave comments. The whole app is a single-process Flask server with a JSON
-file as its datastore. There is no user accounts system, no auth, and no build
-step.
+file as its datastore. There is no user accounts system and no build step —
+visitors are anonymous. The only privileged role is a single moderator who
+unlocks delete controls with `ADMIN_KEY`.
 
 The UI language is Turkish (labels, flash-free error strings, code comments).
 Keep new user-facing strings in Turkish to match; code identifiers stay English.
@@ -107,6 +108,10 @@ patch silently.
 | `/like/<filename>` | POST | Toggles the caller's IP in `liked_by`; returns JSON `{likes, liked}` |
 | `/comment/<filename>` | POST | Form field `comment`; appends and redirects back to the watch page |
 | `/uploads/<filename>` | GET | `send_from_directory` from `uploads/` |
+| `/admin/login` | POST | Form field `admin_key`; sets the session flag |
+| `/admin/logout` | POST | Clears the flag |
+| `/admin/delete/<filename>` | POST | Deletes the record and the file |
+| `/admin/delete-comment/<filename>/<index>` | POST | Deletes one comment by storage index |
 
 `/like` is the only JSON endpoint — `watch.html` calls it with `fetch()` and
 updates the counter in place. Everything else is a classic form POST +
@@ -122,12 +127,28 @@ rejected: comment text to `MAX_COMMENT_LENGTH` (1000) and the title to
 records with longer titles are left as they are, since silently shortening
 stored content is not worth it for a storage concern.
 
-**CSRF.** All three POST routes require a token before the handler runs.
+**CSRF.** Every POST route requires a token before the handler runs.
 `csrf_token()` puts one token per session in the signed cookie; forms carry it
 as a hidden `csrf_token` field and `watch.html` reads it from a
 `<meta name="csrf-token">` tag for the `fetch()` on `/like`. A missing or wrong
 token is a 403 — JSON on `/like`, plain text elsewhere, matching how the 404s
 are split.
+
+**Moderation.** `ADMIN_KEY` is the whole authorization model. It **fails
+closed**: unset means `admin_enabled()` is false, the login form is not
+rendered, and every admin route answers 403 — an empty key must never authorize
+anyone. A correct key sets `session["is_admin"]`, which is safe to trust because
+the cookie is signed; clearing `ADMIN_KEY` also revokes existing sessions.
+`/admin/login` is in `RATE_LIMITS` so the key cannot be brute-forced, and the
+comparison is `hmac.compare_digest` on bytes.
+
+Deletion is irreversible: `admin_delete` drops the record and the file,
+`admin_delete_comment` drops one comment. `remove_upload()` re-checks that the
+resolved path is inside `uploads/` even though the name comes from the record —
+a hand-edited `videos.json` should not be able to delete elsewhere. Comments
+have no id, so they are addressed by storage index; `watch.html` renders them
+reversed, so the template computes `length - loop.index0 - 1`. If you change
+that loop, re-check the index or the wrong comment gets deleted.
 
 **Upload naming.** `build_safe_filename()` is the only place a stored filename
 is produced. It runs `secure_filename` (kills `../` traversal), enforces the
@@ -159,6 +180,8 @@ Runtime knobs, all via environment variables:
 | `RATE_LIMIT_UPLOAD` | `10` | Uploads allowed per client per window |
 | `RATE_LIMIT_COMMENT` | `30` | Comments allowed per client per window |
 | `RATE_LIMIT_LIKE` | `60` | Like toggles allowed per client per window |
+| `RATE_LIMIT_ADMIN_LOGIN` | `5` | Admin key attempts per client per window |
+| `ADMIN_KEY` | unset | Moderator key. Unset disables the admin routes entirely. |
 
 `app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
 import time if they don't exist, so a fresh clone runs without setup.
@@ -166,7 +189,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 97 tests, stdlib only
+python -m unittest -v          # 116 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -229,6 +252,9 @@ These are handled — don't regress them:
 - `.secret_key` is mode 600 and gitignored. Never commit it.
 - `SECRET_KEY` is a root key only. Sign or hash with a `derive_key()` subkey,
   never with the root itself.
+- `ADMIN_KEY` fails closed: unset means no admin routes and no login form. A new
+  privileged route must go through `require_admin()`, and its endpoint name
+  belongs in `RATE_LIMITS` if it takes a secret.
 
 ## Known sharp edges
 

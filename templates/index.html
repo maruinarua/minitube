@@ -87,10 +87,62 @@
             font-size: 0.85rem;
             margin-top: 8px;
         }
+        .admin-box {
+            background: #1e1e1e;
+            border: 1px dashed #444;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        .admin-box input[type="password"] {
+            padding: 8px;
+            border: none;
+            border-radius: 8px;
+            background: #2a2a2a;
+            color: white;
+            margin-right: 8px;
+        }
+        .admin-box button, .delete-btn {
+            background: #444;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .delete-btn { background: #6b1f1f; margin-left: 8px; }
+        .delete-btn:hover { background: #8b2020; }
+        .admin-tag {
+            color: #888;
+            font-size: 0.85rem;
+            margin-right: 8px;
+        }
+        /* CSP satır içi style özniteliğini bloklar; sınıf kullanıyoruz */
+        .inline-form { display: inline; }
+        .empty-note { color: #888; }
     </style>
 </head>
 <body>
     <h1>📺 MiniTube</h1>
+
+    {% if admin_enabled %}
+    <div class="admin-box">
+        {% if is_admin %}
+            <span class="admin-tag">🔑 Yönetici modu açık</span>
+            <form action="/admin/logout" method="POST" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit">Çıkış</button>
+            </form>
+        {% else %}
+            <form action="/admin/login" method="POST">
+                <input type="password" name="admin_key" placeholder="Yönetici anahtarı" required>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit">Giriş</button>
+            </form>
+        {% endif %}
+    </div>
+    {% endif %}
 
     {% with messages = get_flashed_messages() %}
         {% if messages %}
@@ -120,9 +172,15 @@
             ❤️ {{ video.likes if video.likes is defined else 0 }} beğeni
         </div>
         <a class="btn" href="/watch/{{ video.filename }}">▶ Videoyu Aç</a>
+        {% if is_admin %}
+        <form action="/admin/delete/{{ video.filename }}" method="POST" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="delete-btn">Sil</button>
+        </form>
+        {% endif %}
     </div>
     {% else %}
-    <p style="color:#888;">Henüz video yok.</p>
+    <p class="empty-note">Henüz video yok.</p>
     {% endfor %}
 </body>
 </html>

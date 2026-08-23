@@ -430,6 +430,139 @@ class CsrfTests(MiniTubeTest):
             self.assertTrue(any("SameSite=Lax" in c for c in cookies), cookies)
 
 
+class RateLimitTests(MiniTubeTest):
+    """Kimliksiz istemci sınırsız yazma yapamamalı."""
+
+    env = {
+        "RATE_LIMIT_UPLOAD": "2",
+        "RATE_LIMIT_COMMENT": "2",
+        "RATE_LIMIT_LIKE": "2",
+        "RATE_LIMIT_WINDOW": "60",
+    }
+
+    def freeze_clock(self, start=1000.0):
+        """_now'ı teste bağlar; ilerletmek için dönen sözlüğü kullan."""
+        clock = {"t": start}
+        self.module._now = lambda: clock["t"]
+        return clock
+
+    def seed_video(self, filename="seed.mp4"):
+        """Yükleme kotasını harcamadan kayıt oluşturur."""
+        self.write_videos([{
+            "title": "seed", "filename": filename, "views": 0,
+            "likes": 0, "liked_by": [], "comments": [],
+        }])
+        with open(os.path.join(self.tmp, "uploads", filename), "wb") as f:
+            f.write(b"VID")
+        return filename
+
+    # --- sınırlar uygulanıyor mu ---
+
+    def test_upload_limit_is_enforced(self):
+        self.assertEqual(self.upload("a.mp4", title="1").status_code, 200)
+        self.assertEqual(self.upload("b.mp4", title="2").status_code, 200)
+
+        blocked = self.upload("c.mp4", title="3")
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(len(self.stored()), 2, "sınır aşıldığı halde kayıt yazıldı")
+        self.assertEqual(len(self.uploads_dir()), 2, "sınır aşıldığı halde dosya yazıldı")
+
+    def test_comment_limit_is_enforced(self):
+        name = self.seed_video()
+        for i in range(2):
+            self.assertEqual(
+                self.post_form(f"/comment/{name}", data={"comment": f"y{i}"}).status_code, 302
+            )
+
+        blocked = self.post_form(f"/comment/{name}", data={"comment": "fazla"})
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(len(self.stored()[0]["comments"]), 2)
+
+    def test_like_limit_is_reported_as_json(self):
+        name = self.seed_video()
+        for _ in range(2):
+            self.assertEqual(self.post_json(f"/like/{name}").status_code, 200)
+
+        blocked = self.post_json(f"/like/{name}")
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("error", blocked.get_json())
+
+    def test_retry_after_header_is_sent(self):
+        name = self.seed_video()
+        for _ in range(2):
+            self.post_json(f"/like/{name}")
+
+        blocked = self.post_json(f"/like/{name}")
+        retry_after = int(blocked.headers["Retry-After"])
+        self.assertGreaterEqual(retry_after, 1)
+        self.assertLessEqual(retry_after, 60)
+
+    # --- neyin sayılıp sayılmadığı ---
+
+    def test_each_viewer_has_its_own_budget(self):
+        name = self.seed_video()
+        for _ in range(2):
+            self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        self.assertEqual(
+            self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.1"}).status_code,
+            429,
+        )
+        # Başka bir istemci etkilenmemeli
+        self.assertEqual(
+            self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.0.2"}).status_code,
+            200,
+        )
+
+    def test_get_requests_are_not_limited(self):
+        name = self.seed_video()
+        for _ in range(10):
+            self.assertEqual(self.client.get("/").status_code, 200)
+            self.assertEqual(self.client.get(f"/watch/{name}").status_code, 200)
+
+    def test_rejected_uploads_still_count(self):
+        # Geçersiz yükleme spam'i sınırı atlatmamalı
+        self.upload("evil.exe", title="1")
+        self.upload("evil.exe", title="2")
+        self.assertEqual(self.stored(), [])
+
+        self.assertEqual(self.upload("gecerli.mp4", title="3").status_code, 429)
+
+    def test_csrf_rejected_requests_do_not_consume_budget(self):
+        # Sahte istek kurbanın kotasını yakmamalı: kancaların sırası önemli
+        name = self.seed_video()
+        for _ in range(5):
+            self.assertEqual(self.client.post(f"/like/{name}").status_code, 403)
+
+        self.assertEqual(self.post_json(f"/like/{name}").status_code, 200)
+
+    # --- pencere ve bellek ---
+
+    def test_budget_refills_after_window(self):
+        name = self.seed_video()
+        clock = self.freeze_clock()
+
+        for _ in range(2):
+            self.post_json(f"/like/{name}")
+        self.assertEqual(self.post_json(f"/like/{name}").status_code, 429)
+
+        clock["t"] += 61          # pencere doldu
+        self.assertEqual(self.post_json(f"/like/{name}").status_code, 200)
+
+    def test_expired_entries_are_pruned(self):
+        # Süpürme olmasa sözlük her yeni IP için kalıcı kayıt biriktirirdi
+        name = self.seed_video()
+        clock = self.freeze_clock()
+
+        for octet in range(20):
+            self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": f"10.0.1.{octet}"})
+        self.assertGreaterEqual(len(self.module._rate_hits), 20)
+
+        clock["t"] += 60 + 300 + 1     # pencere + süpürme aralığı
+        self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.2.1"})
+
+        self.assertLess(len(self.module._rate_hits), 5, "eski kayıtlar süpürülmedi")
+
+
 class PrivacyTests(MiniTubeTest):
 
     def test_comment_does_not_store_ip(self):

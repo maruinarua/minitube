@@ -141,6 +141,10 @@ Runtime knobs, all via environment variables:
 | `FLASK_DEBUG` | `0` | `1` enables the Werkzeug debugger — localhost only, never with a public `HOST` |
 | `MAX_UPLOAD_MB` | `256` | Upload size cap; exceeding it returns 413 |
 | `SECRET_KEY` | generated | HMAC/session key. Unset means a `.secret_key` file is generated and reused. |
+| `RATE_LIMIT_WINDOW` | `3600` | Rate-limit window in seconds, shared by all three limits |
+| `RATE_LIMIT_UPLOAD` | `10` | Uploads allowed per client per window |
+| `RATE_LIMIT_COMMENT` | `30` | Comments allowed per client per window |
+| `RATE_LIMIT_LIKE` | `60` | Like toggles allowed per client per window |
 
 `app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
 import time if they don't exist, so a fresh clone runs without setup.
@@ -148,7 +152,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 59 tests, stdlib only
+python -m unittest -v          # 69 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -188,6 +192,12 @@ These are handled — don't regress them:
   without extra work — but it also means any new form needs the hidden
   `csrf_token` field and any new `fetch()` needs the `X-CSRF-Token` header.
   The session cookie is `SameSite=Lax` as a second layer.
+- `/upload`, `/comment` and `/like` are rate limited per client
+  (`enforce_rate_limit`), keyed by `viewer_id()` so no raw IP is held even in
+  memory. It runs *after* `verify_csrf`, so a forged request cannot burn a
+  victim's budget — keep that order. Over the limit is a 429 with
+  `Retry-After`. A new POST route is **not** limited until its endpoint name is
+  added to `RATE_LIMITS`.
 - Templates rely on Jinja autoescaping for titles and comment text — no `|safe`.
 - Client IPs are never persisted. Likes store `viewer_id()` (keyed HMAC);
   comments store no identifier. `normalize_video()` scrubs legacy plain IPs on
@@ -208,7 +218,12 @@ it doesn't:
   `git status` before committing.
 - **Content is not verified to be video** beyond the extension check — no
   container/codec sniffing.
-- **No rate limiting** on uploads or comments.
+- **Rate limiting is per process and in memory.** `_rate_hits` lives in the
+  process, so running multiple workers gives each its own counters and a
+  restart clears them. Fine for this single-process app; a shared store would
+  be needed behind a load balancer.
+- **No total disk quota.** Rate limiting slows disk fill but does not cap it —
+  a patient client can still keep uploading within its budget.
 - **IP-based identity** is spoofable via proxies and collapses to one user
   behind a reverse proxy (shared likes). Real accounts are the only real fix.
 

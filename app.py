@@ -28,6 +28,7 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "256"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 MAX_COMMENT_LENGTH = 1000
+MAX_TITLE_LENGTH = 200
 
 # Dosya sistemi ad sınırı (NAME_MAX). Aşılırsa file.save() OSError verir.
 MAX_FILENAME_LENGTH = 255
@@ -321,6 +322,11 @@ def upload():
     if not file or file.filename == "" or not title:
         flash("Başlık ve video dosyası zorunlu.")
         return redirect("/")
+
+    # Yorum metni gibi başlık da kırpılıyor. Sınırsız başlık videos.json'u
+    # şişiriyor, her /watch yazımında yeniden serileştiriliyor ve ana sayfayla
+    # izleme sayfasında üç ayrı yerde render ediliyordu.
+    title = title[:MAX_TITLE_LENGTH].rstrip()
 
     # Diske yazılan ad her zaman bu yardımcıdan geçer
     filename = build_safe_filename(file.filename)

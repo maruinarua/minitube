@@ -94,9 +94,16 @@ new one on the next toggle. Once old likes have aged out, that function and its
 two call sites can go.
 
 The root key must stay stable across restarts or existing likes stop matching
-their owners. Behind a reverse proxy every user still collapses to one address, so
-likes would be shared; that is a known limitation of the design, not a bug to
-patch silently.
+their owners.
+
+Behind a reverse proxy, `remote_addr` is the proxy's address and every visitor
+collapses to one identity — shared likes, and one rate-limit budget for the
+whole site. `TRUSTED_PROXY_COUNT` fixes that by enabling `ProxyFix`, but the
+number **must** come from the operator: it is how many proxies actually sit in
+front of the app. It cannot be derived at runtime, because the only runtime
+source is `X-Forwarded-For` and the client writes that header. Set it too high
+and the client picks its own IP — there is a test class demonstrating exactly
+that. Default is 0, meaning the header is ignored entirely.
 
 ## Routes
 
@@ -182,6 +189,7 @@ Runtime knobs, all via environment variables:
 | `RATE_LIMIT_LIKE` | `60` | Like toggles allowed per client per window |
 | `RATE_LIMIT_ADMIN_LOGIN` | `5` | Admin key attempts per client per window |
 | `ADMIN_KEY` | unset | Moderator key. Unset disables the admin routes entirely. |
+| `TRUSTED_PROXY_COUNT` | `0` | How many trusted proxies sit in front. 0 ignores `X-Forwarded-For`. Never guess this. |
 
 `app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
 import time if they don't exist, so a fresh clone runs without setup.
@@ -189,7 +197,7 @@ import time if they don't exist, so a fresh clone runs without setup.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 116 tests, stdlib only
+python -m unittest -v          # 124 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -275,8 +283,9 @@ it doesn't:
   be needed behind a load balancer.
 - **No total disk quota.** Rate limiting slows disk fill but does not cap it —
   a patient client can still keep uploading within its budget.
-- **IP-based identity** is spoofable via proxies and collapses to one user
-  behind a reverse proxy (shared likes). Real accounts are the only real fix.
+- **IP-based identity** is still only an approximation of a person. Behind a
+  proxy it needs `TRUSTED_PROXY_COUNT` set correctly; on a shared NAT several
+  people look like one. Real accounts are the only real fix.
 
 ## Git
 

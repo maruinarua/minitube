@@ -1,16 +1,16 @@
 from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session, g
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
-from collections import defaultdict, deque
 from datetime import datetime
+import contextlib
 import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import secrets
+import sqlite3
 import tempfile
-import threading
 import time
 import uuid
 
@@ -76,9 +76,6 @@ RATE_LIMITS = {
 # Moderasyon anahtarı. Tanımlı değilse yönetici yolu tamamen kapalı; boş
 # anahtarla herkesin silebilmesi kabul edilemez.
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
-
-# Süresi geçmiş kayıtları ne sıklıkla süpüreceğimiz
-RATE_SWEEP_INTERVAL = 300
 
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -189,31 +186,46 @@ def verify_csrf():
         return jsonify({"error": "Geçersiz veya eksik CSRF anahtarı"}), 403
     return "Geçersiz veya eksik CSRF anahtarı", 403
 
-# İstek zaman damgaları: (uç, viewer_id) -> deque[float]. Süreç içi tutuluyor,
-# yani birden çok worker ile çalıştırılırsa her worker kendi sayacını tutar ve
-# yeniden başlatmada sıfırlanır. Tek süreçlik bu uygulama için yeterli.
-_rate_hits = defaultdict(deque)
-_rate_lock = threading.Lock()
-_last_sweep = 0.0
+# Sayaçlar SQLite'ta: birden çok worker aynı dosyayı paylaştığı için sınır
+# süreçler arasında ortak. Redis yerine stdlib sqlite3 seçildi; yeni bağımlılık
+# ya da işletilecek servis getirmiyor ve videos.json zaten uygulamayı tek
+# makineye bağladığı için makineler arası bir sayaç çözemeyeceği bir sorunu
+# çözmüş olurdu.
+RATE_DB_FILE = os.environ.get("RATE_LIMIT_DB", "rate_limits.db")
 
 def _now():
-    # Testlerin zamanı ileri sarabilmesi için tek nokta
-    return time.monotonic()
+    # Duvar saati, monotonic değil: monotonic'in başlangıcı süreçlere göre
+    # değişebilir, paylaşımlı bir tabloda karşılaştırılamaz.
+    return time.time()
 
-def _sweep_expired(now):
-    # Çağıran _rate_lock'u tutuyor olmalı. Süpürme olmazsa sözlük, saldırganın
-    # kullandığı her yeni IP için kalıcı bir kayıt biriktirirdi.
-    global _last_sweep
-    if now - _last_sweep < RATE_SWEEP_INTERVAL:
-        return
-    _last_sweep = now
+def _rate_connection():
+    # Bağlantı çağrı başına açılıyor: sqlite3 bağlantıları iş parçacıkları
+    # arasında paylaşılamaz, bu ölçekte maliyeti de önemsiz.
+    conn = sqlite3.connect(RATE_DB_FILE, timeout=10, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")     # okuyucu ve yazıcı birbirini beklemesin
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
-    for key in list(_rate_hits):
-        hits = _rate_hits[key]
-        while hits and hits[0] <= now - RATE_LIMIT_WINDOW:
-            hits.popleft()
-        if not hits:
-            del _rate_hits[key]
+def init_rate_store():
+    with contextlib.closing(_rate_connection()) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rate_hits (
+                endpoint TEXT NOT NULL,
+                viewer   TEXT NOT NULL,
+                hit_at   REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS rate_hits_lookup ON rate_hits(endpoint, viewer, hit_at)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS rate_hits_expiry ON rate_hits(hit_at)")
+
+init_rate_store()
+
+def rate_limit_hit_count():
+    """Tabloda duran kayıt sayısı. Testler süpürmeyi buradan doğruluyor."""
+    with contextlib.closing(_rate_connection()) as conn:
+        return conn.execute("SELECT COUNT(*) FROM rate_hits").fetchone()[0]
 
 def rate_limit_retry_after(endpoint, viewer):
     """İzin varsa None döner ve isteği sayar.
@@ -223,19 +235,35 @@ def rate_limit_retry_after(endpoint, viewer):
     """
     limit = RATE_LIMITS[endpoint]
     now = _now()
+    cutoff = now - RATE_LIMIT_WINDOW
 
-    with _rate_lock:
-        _sweep_expired(now)
+    with contextlib.closing(_rate_connection()) as conn:
+        # IMMEDIATE: yazma kilidini hemen alıyoruz. Sayma ile ekleme arasında
+        # başka bir worker araya girerse sınır aşılabilirdi.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Süresi geçenleri her seferinde siliyoruz; tablo böylece
+            # saldırganın döndürdüğü IP'lerle sınırsız büyümüyor.
+            conn.execute("DELETE FROM rate_hits WHERE hit_at <= ?", (cutoff,))
 
-        hits = _rate_hits[(endpoint, viewer)]
-        while hits and hits[0] <= now - RATE_LIMIT_WINDOW:
-            hits.popleft()
+            count, oldest = conn.execute(
+                "SELECT COUNT(*), MIN(hit_at) FROM rate_hits WHERE endpoint = ? AND viewer = ?",
+                (endpoint, viewer),
+            ).fetchone()
 
-        if len(hits) >= limit:
-            return max(1, int(hits[0] + RATE_LIMIT_WINDOW - now))
+            if count >= limit:
+                conn.execute("COMMIT")
+                return max(1, int(oldest + RATE_LIMIT_WINDOW - now))
 
-        hits.append(now)
-        return None
+            conn.execute(
+                "INSERT INTO rate_hits (endpoint, viewer, hit_at) VALUES (?, ?, ?)",
+                (endpoint, viewer, now),
+            )
+            conn.execute("COMMIT")
+            return None
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
 
 @app.before_request
 def enforce_rate_limit():

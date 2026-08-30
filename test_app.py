@@ -10,7 +10,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import textwrap
 import tempfile
 import unittest
 
@@ -561,12 +563,12 @@ class RateLimitTests(MiniTubeTest):
 
         for octet in range(20):
             self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": f"10.0.1.{octet}"})
-        self.assertGreaterEqual(len(self.module._rate_hits), 20)
+        self.assertGreaterEqual(self.module.rate_limit_hit_count(), 20)
 
-        clock["t"] += 60 + 300 + 1     # pencere + süpürme aralığı
+        clock["t"] += 61              # pencere doldu
         self.post_json(f"/like/{name}", environ_base={"REMOTE_ADDR": "10.0.2.1"})
 
-        self.assertLess(len(self.module._rate_hits), 5, "eski kayıtlar süpürülmedi")
+        self.assertLess(self.module.rate_limit_hit_count(), 5, "eski kayıtlar süpürülmedi")
 
 
 class SecurityHeaderTests(MiniTubeTest):
@@ -1042,6 +1044,63 @@ class ProxyFixMisconfigurationTests(MiniTubeTest):
         stored = self.stored()[0]["liked_by"]
         self.assertEqual(stored, [self.module.viewer_id("9.9.9.9")],
                          "fazla sayılan proxy istemciye IP seçtiriyor")
+
+
+class SharedRateLimitTests(MiniTubeTest):
+    """Sınır, ayrı süreçler arasında da ortak olmalı."""
+
+    env = {"RATE_LIMIT_LIKE": "4", "RATE_LIMIT_WINDOW": "60"}
+
+    def spend_in_subprocess(self, attempts):
+        """Ayrı bir Python sürecinde sınırı yoklar; kaçının geçtiğini döner."""
+        script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {self.tmp!r})
+            import app
+            allowed = 0
+            for _ in range({attempts}):
+                if app.rate_limit_retry_after("like", "ortak-viewer") is None:
+                    allowed += 1
+            print(allowed)
+        """)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=self.tmp, env={**os.environ, "PYTHONPATH": self.tmp},
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        return int(result.stdout.strip())
+
+    def test_budget_is_shared_across_processes(self):
+        # İki ayrı süreç, ikisi de 4'lük sınırı görmeli: toplam 4 geçmeli.
+        # Süreç içi sözlükle her biri kendi 4'ünü harcar, toplam 8 olurdu.
+        first = self.spend_in_subprocess(3)
+        second = self.spend_in_subprocess(3)
+
+        self.assertEqual(first, 3, "ilk süreç kendi payını harcayamadı")
+        self.assertEqual(second, 1, "ikinci süreç kalan payı değil kendi payını gördü")
+        self.assertEqual(first + second, 4)
+
+    def test_store_is_a_file_on_disk(self):
+        # Paylaşımın çalışması dosyanın gerçekten yazılmasına bağlı
+        self.spend_in_subprocess(1)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, self.module.RATE_DB_FILE)))
+        self.assertGreaterEqual(self.module.rate_limit_hit_count(), 1)
+
+    def test_parent_and_child_share_the_same_budget(self):
+        # Ana süreçten harcanan, çocuk süreçte de görülmeli
+        for _ in range(4):
+            self.module.rate_limit_retry_after("like", "ortak-viewer")
+
+        self.assertEqual(self.spend_in_subprocess(2), 0, "çocuk süreç sınırı görmedi")
+
+    def test_concurrent_processes_do_not_exceed_the_limit(self):
+        # Say-ve-ekle atomik değilse eşzamanlı süreçler sınırı aşabilir
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(self.spend_in_subprocess, [3, 3, 3, 3]))
+
+        self.assertEqual(sum(results), 4, f"sınır aşıldı: {results}")
 
 
 class PrivacyTests(MiniTubeTest):

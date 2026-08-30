@@ -6,7 +6,7 @@ Guidance for AI assistants working in this repository.
 
 MiniTube — a minimal YouTube-style video sharing app built with Flask. Users
 upload a video with a title, watch it, like it (one like per IP, toggleable),
-and leave comments. The whole app is a single-process Flask server with a JSON
+and leave comments. The whole app is one Flask module with a JSON
 file as its datastore. There is no user accounts system and no build step —
 visitors are anonymous. The only privileged role is a single moderator who
 unlocks delete controls with `ADMIN_KEY`.
@@ -24,6 +24,7 @@ videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
                  Gitignored except .gitkeep, which keeps the directory.
 .secret_key      Generated HMAC/session key. Gitignored, mode 600.
+rate_limits.db   Shared rate-limit counters (sqlite3). Gitignored.
 templates/
   index.html     Home: upload form + video list. Styles are inline in <style>.
   watch.html     Player page: video, like button (fetch/JSON), comments.
@@ -142,6 +143,18 @@ as a hidden `csrf_token` field and `watch.html` reads it from a
 token is a 403 — JSON on `/like`, plain text elsewhere, matching how the 404s
 are split.
 
+**Rate limiting.** Counters are rows in `rate_limits.db`, not a dict in the
+process, so multiple workers on one host share a single budget. The check and
+the insert run inside `BEGIN IMMEDIATE`; without that write lock two workers
+could both read "one under the limit" and both admit a request. Timestamps use
+`time.time()` rather than `time.monotonic()` because a monotonic clock's origin
+is not comparable between processes. Expired rows are deleted on every call, so
+the table cannot grow with every IP an attacker cycles through.
+
+Redis would work too, but it would add a runtime dependency and a service to
+operate, and `videos.json` already ties the app to one host — a cross-machine
+limiter would solve a problem the datastore cannot survive anyway.
+
 **Moderation.** `ADMIN_KEY` is the whole authorization model. It **fails
 closed**: unset means `admin_enabled()` is false, the login form is not
 rendered, and every admin route answers 403 — an empty key must never authorize
@@ -190,6 +203,7 @@ Runtime knobs, all via environment variables:
 | `RATE_LIMIT_LIKE` | `60` | Like toggles allowed per client per window |
 | `RATE_LIMIT_ADMIN_LOGIN` | `5` | Admin key attempts per client per window |
 | `ADMIN_KEY` | unset | Moderator key. Unset disables the admin routes entirely. |
+| `RATE_LIMIT_DB` | `rate_limits.db` | Where shared counters live. All workers must point at the same path. |
 | `TRUSTED_PROXY_COUNT` | `0` | How many trusted proxies sit in front. 0 ignores `X-Forwarded-For`. Never guess this. |
 
 `app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
@@ -200,7 +214,7 @@ longer lands in diffs. A clone starts with an empty library by design.
 There is a test suite and no linter config or CI:
 
 ```bash
-python -m unittest -v          # 124 tests, stdlib only
+python -m unittest -v          # 128 tests, stdlib only
 ```
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
@@ -254,7 +268,8 @@ These are handled — don't regress them:
   memory. It runs *after* `verify_csrf`, so a forged request cannot burn a
   victim's budget — keep that order. Over the limit is a 429 with
   `Retry-After`. A new POST route is **not** limited until its endpoint name is
-  added to `RATE_LIMITS`.
+  added to `RATE_LIMITS`. Counters live in `rate_limits.db` (stdlib `sqlite3`),
+  so every worker sharing the directory shares one budget.
 - Templates rely on Jinja autoescaping for titles and comment text — no `|safe`.
 - Client IPs are never persisted. Likes store `viewer_id()` (keyed HMAC);
   comments store no identifier. `normalize_video()` scrubs legacy plain IPs on
@@ -274,10 +289,6 @@ it doesn't:
 
 - **Content is not verified to be video** beyond the extension check — no
   container/codec sniffing.
-- **Rate limiting is per process and in memory.** `_rate_hits` lives in the
-  process, so running multiple workers gives each its own counters and a
-  restart clears them. Fine for this single-process app; a shared store would
-  be needed behind a load balancer.
 - **No total disk quota.** Rate limiting slows disk fill but does not cap it —
   a patient client can still keep uploading within its budget.
 - **IP-based identity** is still only an approximation of a person. Behind a

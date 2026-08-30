@@ -4,6 +4,8 @@ uploads/*
 videos.json
 videos.db
 .videos-*.json
+rate_limits.db
+rate_limits.db-*
 
 # Çalışma anahtarı - depoya girmemeli
 .secret_key

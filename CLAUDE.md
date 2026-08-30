@@ -197,7 +197,7 @@ Runtime knobs, all via environment variables:
 | `FLASK_DEBUG` | `0` | `1` enables the Werkzeug debugger — localhost only, never with a public `HOST` |
 | `MAX_UPLOAD_MB` | `256` | Upload size cap; exceeding it returns 413 |
 | `SECRET_KEY` | generated | HMAC/session key. Unset means a `.secret_key` file is generated and reused. |
-| `RATE_LIMIT_WINDOW` | `3600` | Rate-limit window in seconds, shared by all three limits |
+| `RATE_LIMIT_WINDOW` | `3600` | Rate-limit window in seconds, shared by every limit below |
 | `RATE_LIMIT_UPLOAD` | `10` | Uploads allowed per client per window |
 | `RATE_LIMIT_COMMENT` | `30` | Comments allowed per client per window |
 | `RATE_LIMIT_LIKE` | `60` | Like toggles allowed per client per window |
@@ -210,6 +210,39 @@ Runtime knobs, all via environment variables:
 import time if they don't exist, so a fresh clone runs without setup. None of
 the three are tracked: runtime data stays out of git, so view-count churn no
 longer lands in diffs. A clone starts with an empty library by design.
+
+### In production
+
+`python app.py` starts Werkzeug's development server — it prints a warning
+saying so, and it serves one request at a time. For a real deployment use a WSGI
+server. gunicorn is deliberately **not** in `requirements.txt`: it is a
+deployment choice, and keeping it out is what lets Flask stay the only runtime
+dependency.
+
+```bash
+pip install gunicorn
+ADMIN_KEY=... gunicorn -w 4 -b 127.0.0.1:5000 app:app
+```
+
+Things that are easy to get wrong here:
+
+- **All workers must share one working directory.** `videos.json`,
+  `uploads/`, `.secret_key` and `rate_limits.db` are all resolved relative to
+  the process's cwd. Workers in different directories get separate datastores,
+  separate identities, and a rate limit multiplied by the worker count.
+- **`HOST`, `PORT` and `FLASK_DEBUG` do nothing under gunicorn.** They are read
+  inside the `__main__` block, which only runs for `python app.py`. Binding is
+  gunicorn's `-b`, and there is no debugger to enable.
+- **One host, not several.** Multiple workers on one machine are fine — the
+  rate limiter shares counters through SQLite and was verified with four
+  gunicorn workers. Multiple *machines* are not: `videos.json` is a local file
+  rewritten whole with no cross-host locking, so two machines would silently
+  lose each other's writes. That needs the datastore replaced first.
+- **Behind TLS**, set `SESSION_COOKIE_SECURE` in `app.config`. It is off because
+  the app defaults to plain HTTP on localhost, where enabling it would stop the
+  session cookie — and therefore CSRF — from working at all.
+- Set `TRUSTED_PROXY_COUNT` only if a reverse proxy is actually in front, and to
+  the real number. See the identity section above for why it cannot be guessed.
 
 There is a test suite and no linter config or CI:
 

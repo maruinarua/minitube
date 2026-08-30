@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, redirect, send_from_directory, jsonify, flash, session, g
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 from collections import defaultdict, deque
 from datetime import datetime
@@ -36,6 +37,27 @@ MAX_FILENAME_LENGTH = 255
 # Tarayıcı çerezi başka sitelerden gelen POST'lara eklemesin. Token asıl
 # koruma; bu ikinci katman.
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# Önümüzde kaç GÜVENİLİR proxy olduğu. Bu sayı otomatik belirlenemez:
+# tek kaynak X-Forwarded-For başlığıdır, o da istemci kontrolündedir.
+# Başlıktaki girdi sayısına bakarak karar verilseydi saldırgan başlığa
+# istediği kadar sahte IP ekleyip hangi değerin "gerçek istemci" sayılacağını
+# kendisi seçerdi; hız sınırı ve beğeni sayımı tek satırla atlatılırdı.
+# Bu yüzden değer operatörden geliyor ve varsayılan 0 (kapalı): yapılandırma
+# yanlışsa başlığa hiç güvenilmiyor, remote_addr olduğu gibi kullanılıyor.
+TRUSTED_PROXY_COUNT = int(os.environ.get("TRUSTED_PROXY_COUNT", "0"))
+
+if TRUSTED_PROXY_COUNT > 0:
+    # x_host/x_port/x_prefix kasten 0: proxy'nin Host'u ezmesine gerek yok
+    # ve açık bırakmak yönlendirme/mutlak URL üretimini kirletebilir.
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=TRUSTED_PROXY_COUNT,
+        x_proto=TRUSTED_PROXY_COUNT,
+        x_host=0,
+        x_port=0,
+        x_prefix=0,
+    )
 
 # Token gerektirmeyen, durum değiştirmeyen yöntemler
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}

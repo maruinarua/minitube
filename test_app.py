@@ -47,6 +47,7 @@ class MiniTubeTest(unittest.TestCase):
         os.environ.pop("FLASK_DEBUG", None)
         os.environ.pop("MAX_UPLOAD_MB", None)
         os.environ.pop("ADMIN_KEY", None)
+        os.environ.pop("TRUSTED_PROXY_COUNT", None)
         os.environ.update(self.env)
 
         shutil.copy(os.path.join(REPO, "app.py"), os.path.join(self.tmp, "app.py"))
@@ -957,6 +958,90 @@ class AdminBruteForceTests(MiniTubeTest):
             self.post_form("/admin/login", data={"admin_key": "cok-gizli-anahtar"}).status_code,
             429,
         )
+
+
+class ProxyFixDisabledTests(MiniTubeTest):
+    """Varsayılan: X-Forwarded-For'a hiç güvenilmiyor."""
+
+    def test_disabled_by_default(self):
+        self.assertEqual(self.module.TRUSTED_PROXY_COUNT, 0)
+
+    def test_forwarded_header_cannot_forge_identity(self):
+        name = self.upload_video("clip.mp4")
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": "9.9.9.9"})
+
+        stored = self.stored()[0]["liked_by"]
+        self.assertEqual(stored, [self.module.viewer_id("127.0.0.1")])
+        self.assertNotIn(self.module.viewer_id("9.9.9.9"), stored)
+
+    def test_padded_header_cannot_forge_identity(self):
+        # Gerçek saldırı bu: Werkzeug, başlıkta güvenilen sayıdan az girdi
+        # varsa onu yok sayıyor. Yani tek girdilik bir başlık yüksek bir
+        # sayıda bile zararsız kalır; saldırgan başlığı doldurarak seçtiği
+        # değeri "gerçek istemci" yaptırır.
+        name = self.upload_video("clip.mp4")
+        padded = "9.9.9.9, " + ", ".join(f"10.0.0.{i}" for i in range(1, 12))
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": padded})
+
+        stored = self.stored()[0]["liked_by"]
+        self.assertEqual(stored, [self.module.viewer_id("127.0.0.1")])
+        for forged in ("9.9.9.9", "10.0.0.1", "10.0.0.11"):
+            self.assertNotIn(self.module.viewer_id(forged), stored)
+
+    def test_forged_headers_share_one_budget(self):
+        # Farklı sahte IP'ler ayrı kimlik/kota almamalı: ikinci istek aynı
+        # kişiden sayılıp beğeniyi geri almalı
+        name = self.upload_video("clip.mp4")
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": "1.1.1.1"})
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": "2.2.2.2"})
+        self.assertEqual(self.stored()[0]["likes"], 0)
+
+
+class ProxyFixEnabledTests(MiniTubeTest):
+    """Tek güvenilir proxy arkasında doğru istemci IP'si alınmalı."""
+
+    env = {"TRUSTED_PROXY_COUNT": "1"}
+
+    def test_enabled_from_configuration(self):
+        self.assertEqual(self.module.TRUSTED_PROXY_COUNT, 1)
+
+    def test_only_the_value_the_proxy_appended_is_trusted(self):
+        # İstemci başa 9.9.9.9 uydurdu; güvenilir proxy sona gerçek IP'yi yazdı
+        name = self.upload_video("clip.mp4")
+        self.post_json(
+            f"/like/{name}", headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.7"}
+        )
+
+        stored = self.stored()[0]["liked_by"]
+        self.assertEqual(stored, [self.module.viewer_id("203.0.113.7")])
+        self.assertNotIn(self.module.viewer_id("9.9.9.9"), stored)
+
+    def test_distinct_clients_get_distinct_identities(self):
+        # Proxy arkasında herkesin tek kimliğe çökmesi sorunu çözülmeli
+        name = self.upload_video("clip.mp4")
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": "203.0.113.1"})
+        self.post_json(f"/like/{name}", headers={"X-Forwarded-For": "203.0.113.2"})
+        self.assertEqual(self.stored()[0]["likes"], 2)
+
+
+class ProxyFixMisconfigurationTests(MiniTubeTest):
+    """Sayı gerçekten önde duran proxy sayısından büyükse ne olur."""
+
+    env = {"TRUSTED_PROXY_COUNT": "2"}
+
+    def test_too_high_a_count_lets_the_client_pick_its_own_ip(self):
+        # Gerçekte tek proxy varken 2 demek, istemcinin başa eklediği değeri
+        # "gerçek istemci" yapar. Bu testin varlık sebebi: sayı tahmin
+        # edilemez, operatörün altyapısından bilinmek zorunda. Başlıktaki
+        # girdi sayısından otomatik türetmek tam olarak bu açığı üretir.
+        name = self.upload_video("clip.mp4")
+        self.post_json(
+            f"/like/{name}", headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.7"}
+        )
+
+        stored = self.stored()[0]["liked_by"]
+        self.assertEqual(stored, [self.module.viewer_id("9.9.9.9")],
+                         "fazla sayılan proxy istemciye IP seçtiriyor")
 
 
 class PrivacyTests(MiniTubeTest):

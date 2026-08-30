@@ -20,8 +20,9 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
 requirements.txt Flask, the only runtime dependency.
-videos.json      The live datastore (a JSON array of video objects).
+videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
+                 Gitignored except .gitkeep, which keeps the directory.
 .secret_key      Generated HMAC/session key. Gitignored, mode 600.
 templates/
   index.html     Home: upload form + video list. Styles are inline in <style>.
@@ -192,7 +193,9 @@ Runtime knobs, all via environment variables:
 | `TRUSTED_PROXY_COUNT` | `0` | How many trusted proxies sit in front. 0 ignores `X-Forwarded-For`. Never guess this. |
 
 `app.py` creates `uploads/`, an empty `videos.json`, and `.secret_key` at
-import time if they don't exist, so a fresh clone runs without setup.
+import time if they don't exist, so a fresh clone runs without setup. None of
+the three are tracked: runtime data stays out of git, so view-count churn no
+longer lands in diffs. A clone starts with an empty library by design.
 
 There is a test suite and no linter config or CI:
 
@@ -269,12 +272,6 @@ These are handled — don't regress them:
 Still open. Fix when the task calls for it — flag, don't silently patch, when
 it doesn't:
 
-- **Generated data is committed.** `videos.json` and the existing file in
-  `uploads/` were committed before `.gitignore` existed, so they stay tracked
-  and `.gitignore` won't mask them. They no longer contain IP addresses, but
-  view-count churn still lands in diffs. To stop tracking them without deleting
-  local data: `git rm --cached videos.json uploads/<file>`. Until then, check
-  `git status` before committing.
 - **Content is not verified to be video** beyond the extension check — no
   container/codec sniffing.
 - **Rate limiting is per process and in memory.** `_rate_hits` lives in the

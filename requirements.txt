@@ -1,1 +1,12 @@
-Flask>=3.0
+# Doğrudan içe aktarılan paketler.
+#
+# ~= yama sürümlerine izin verir, minor ve major'ı kapatır: güvenlik
+# düzeltmeleri gelmeye devam eder ama davranış değiştiren bir sürüm CI'ı
+# kodla ilgisiz şekilde kıramaz.
+#
+# Werkzeug'u Flask zaten kuruyor, ama app.py ondan doğrudan içe aktarma
+# yapıyor (secure_filename, ProxyFix) ve testler bu davranışlara dayanıyor.
+# Flask onu werkzeug>=3.1.0 ile serbest bıraktığı için burada ayrıca
+# bildiriliyor; yoksa yalnızca Flask'ı sabitlemek koruma sağlamazdı.
+Flask~=3.1.3
+Werkzeug~=3.1.8

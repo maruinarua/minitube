@@ -19,6 +19,7 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 ```
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
+.github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask, the only runtime dependency.
 videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
@@ -244,11 +245,16 @@ Things that are easy to get wrong here:
 - Set `TRUSTED_PROXY_COUNT` only if a reverse proxy is actually in front, and to
   the real number. See the identity section above for why it cannot be guessed.
 
-There is a test suite and no linter config or CI:
+The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 128 tests, stdlib only
+python -m unittest -v          # 128 tests
 ```
+
+GitHub Actions runs exactly that on every push and pull request against `main`,
+across Python 3.10 through 3.13 (`.github/workflows/tests.yml`). All four are
+verified locally, so a red matrix entry means a real incompatibility rather than
+an untested guess. There is still no linter config.
 
 `test_app.py` re-imports `app.py` inside a throwaway directory per test, so it
 never touches the real `videos.json` or `uploads/`. It covers the security and

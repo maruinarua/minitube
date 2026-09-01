@@ -20,7 +20,8 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
 .github/         Actions workflow: runs the suite on 3.10-3.13.
-requirements.txt Flask and Werkzeug, both version-pinned.
+requirements.txt Flask and Werkzeug — what the app imports directly.
+requirements-lock.txt  All 7 resolved versions, transitive deps included.
 videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
                  Gitignored except .gitkeep, which keeps the directory.
@@ -189,14 +190,29 @@ pip install -r requirements.txt
 python app.py          # http://127.0.0.1:5000, debug off
 ```
 
-`requirements.txt` uses `~=`, so patch releases (including security fixes)
-still arrive while minor and major releases are blocked — an upstream behaviour
-change should not turn CI red without a code change. Werkzeug is listed
-explicitly even though Flask installs it: `app.py` imports `secure_filename`
-and `ProxyFix` from it directly and tests assert their behaviour, while Flask
-only requires `werkzeug>=3.1.0`. Pinning Flask alone would have left that open.
-Transitive packages (Jinja2, MarkupSafe, click, itsdangerous, blinker) are still
-unpinned; a full lockfile is a separate decision.
+Two files, different jobs. `requirements.txt` declares what the app imports —
+Flask, plus Werkzeug because `app.py` imports `secure_filename` and `ProxyFix`
+from it directly and tests assert their behaviour, while Flask itself only
+requires `werkzeug>=3.1.0`. It uses `~=`, so patch releases including security
+fixes still arrive while minor and major ones are blocked.
+
+`requirements-lock.txt` is `pip freeze` output: all seven resolved versions,
+transitive packages included. That matters because the suite leans on Jinja2's
+autoescaping (`test_comment_is_capped_and_escaped`,
+`test_long_title_is_still_escaped_when_rendered`), and `requirements.txt` never
+constrained Jinja2 at all. CI installs with
+
+```bash
+pip install -r requirements.txt -c requirements-lock.txt
+```
+
+so *what* is installed comes from the first file and *which version* from the
+second. Using the lock as a constraint rather than installing it directly is
+deliberate: if the two files drift apart, pip cannot resolve and CI fails loudly
+instead of quietly testing a stale set. Regenerate the lock with the command in
+its header after changing `requirements.txt`.
+
+Versions are pinned but not hash-verified; `--require-hashes` is a further step.
 
 Runtime knobs, all via environment variables:
 

@@ -23,10 +23,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-lock.txt
 
       - name: Bağımlılıkları kur
-        run: pip install -r requirements.txt
+        # Ne kurulacağı requirements.txt'den, hangi sürüm olacağı kilitten
+        # geliyor. Alt bağımlılıklar da (Jinja2, MarkupSafe, ...) sabitleniyor.
+        # İki dosya birbirinden ayrı düşerse pip çözüm yapamaz ve adım kırılır.
+        run: pip install -r requirements.txt -c requirements-lock.txt
+
+      - name: Kurulan sürümler
+        run: pip freeze
 
       - name: Testler
         # Test paketi yalnızca stdlib kullanıyor; ek bir koşucuya gerek yok.

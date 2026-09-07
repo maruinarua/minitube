@@ -27,11 +27,30 @@ jobs:
             requirements.txt
             requirements-lock.txt
 
+      - name: Kilit requirements.txt ile tutarlı mı
+        # Kurulum kilitten yapıldığı için, requirements.txt güncellenip kilit
+        # unutulursa CI eski sürümü test eder ve bunu fark etmezdik. Burada
+        # kilitteki sabitlemeler kısıt olarak veriliyor: uyuşmazlarsa pip
+        # çözüm yapamaz ve adım kırılır. Karmalar ayıklanıyor, çünkü karma
+        # gören pip her paketin == ile sabitlenmesini bekler; requirements.txt
+        # ise bilerek ~= kullanıyor.
+        run: |
+          grep -v -e '--hash' -e '^[[:space:]]*#' requirements-lock.txt \
+            | sed 's/[[:space:]]*\\$//' > /tmp/pins.txt
+          cat /tmp/pins.txt
+          pip install --dry-run --ignore-installed \
+            -r requirements.txt -c /tmp/pins.txt
+
       - name: Bağımlılıkları kur
-        # Ne kurulacağı requirements.txt'den, hangi sürüm olacağı kilitten
-        # geliyor. Alt bağımlılıklar da (Jinja2, MarkupSafe, ...) sabitleniyor.
-        # İki dosya birbirinden ayrı düşerse pip çözüm yapamaz ve adım kırılır.
-        run: pip install -r requirements.txt -c requirements-lock.txt
+        # Kurulum kilitten: sürümler sabit ve indirilen her dosyanın sha256'sı
+        # doğrulanıyor. Karma tutmazsa kurulum durur.
+        #
+        # --only-binary bilerek: kilitte hem tekerlek hem sdist karması var,
+        # dolayısıyla tekerlek karması tutmazsa pip sessizce sdist'e düşüp
+        # kaynaktan derleyebiliyor. O yolda derleme bağımlılıkları (flit_core
+        # gibi) karma doğrulaması olmadan indiriliyor - yani doğrulamada bir
+        # boşluk kalıyor. Yalnızca tekerlek kullanmak ikisini de kapatıyor.
+        run: "pip install --only-binary=:all: --require-hashes -r requirements-lock.txt"
 
       - name: Kurulan sürümler
         run: pip freeze

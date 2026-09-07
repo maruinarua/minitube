@@ -21,7 +21,7 @@ app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
-requirements-lock.txt  All 7 resolved versions, transitive deps included.
+requirements-lock.txt  All 7 resolved versions with sha256 hashes.
 videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
                  Gitignored except .gitkeep, which keeps the directory.
@@ -196,23 +196,37 @@ from it directly and tests assert their behaviour, while Flask itself only
 requires `werkzeug>=3.1.0`. It uses `~=`, so patch releases including security
 fixes still arrive while minor and major ones are blocked.
 
-`requirements-lock.txt` is `pip freeze` output: all seven resolved versions,
-transitive packages included. That matters because the suite leans on Jinja2's
-autoescaping (`test_comment_is_capped_and_escaped`,
+`requirements-lock.txt` pins all seven resolved versions — transitive packages
+included — and carries a sha256 for every file of every version. That matters
+because the suite leans on Jinja2's autoescaping
+(`test_comment_is_capped_and_escaped`,
 `test_long_title_is_still_escaped_when_rendered`), and `requirements.txt` never
-constrained Jinja2 at all. CI installs with
+constrained Jinja2 at all. CI installs from the lock:
 
 ```bash
-pip install -r requirements.txt -c requirements-lock.txt
+pip install --only-binary=:all: --require-hashes -r requirements-lock.txt
 ```
 
-so *what* is installed comes from the first file and *which version* from the
-second. Using the lock as a constraint rather than installing it directly is
-deliberate: if the two files drift apart, pip cannot resolve and CI fails loudly
-instead of quietly testing a stale set. Regenerate the lock with the command in
-its header after changing `requirements.txt`.
+`--require-hashes` means a downloaded file whose digest is not in the list stops
+the install, so a republished or substituted artifact cannot slip through
+unnoticed. Regenerate the lock with the `pip-compile` command in its header
+after changing `requirements.txt`; pip-tools is needed only to regenerate, never
+to install.
 
-Versions are pinned but not hash-verified; `--require-hashes` is a further step.
+`--only-binary` is not decoration. The lock lists the sdist hash alongside the
+wheel's, so a wheel whose hash does not match makes pip fall back to building
+from source — and PEP 517 build dependencies (`flit_core` for Flask) are fetched
+into the build environment with **no** hash checking. Wheels-only closes both the
+fallback and that gap. Every pinned package ships wheels for the CI matrix.
+
+Hash-checking mode requires every requirement pinned with `==`, so
+`requirements.txt` (`~=` on purpose) cannot be passed as a constraint file
+alongside it — the two cannot be installed in one command any more. The
+consistency check that used to be implicit is therefore its own CI step: it
+strips the hashes out of the lock, feeds the bare pins to
+`pip install --dry-run -r requirements.txt -c ...`, and fails when the two files
+disagree. Keep that step. Without it, bumping `requirements.txt` and forgetting
+the lock leaves CI green while testing the old version.
 
 Runtime knobs, all via environment variables:
 

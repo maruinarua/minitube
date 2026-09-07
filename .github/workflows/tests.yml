@@ -26,6 +26,18 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-lock.txt
+            requirements-pip.txt
+
+      - name: pip'i sabitle
+        # Karmaları doğrulayan araç pip'in kendisi ve sürümü koşucu imajından
+        # geliyordu; bağımlılıklar sabitken onları kuran şey değildi. Burada
+        # sabitleniyor ve kendi karmasıyla doğrulanıyor.
+        #
+        # Sınır: bu doğrulamayı henüz sabitlenmemiş olan pip yapıyor. Zincir
+        # koşucudaki pip'e kadar kısalıyor, sıfıra inmiyor.
+        run: |
+          pip install --only-binary=:all: --require-hashes -r requirements-pip.txt
+          pip --version
 
       - name: Kilit requirements.txt ile tutarlı mı
         # Kurulum kilitten yapıldığı için, requirements.txt güncellenip kilit

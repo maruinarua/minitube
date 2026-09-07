@@ -22,6 +22,7 @@ test_app.py      Security/privacy test suite (stdlib unittest, no deps).
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
 requirements-lock.txt  All 7 resolved versions with sha256 hashes.
+requirements-pip.txt   pip itself, pinned and hashed. CI installs it first.
 videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
                  Gitignored except .gitkeep, which keeps the directory.
@@ -190,8 +191,9 @@ pip install -r requirements.txt
 python app.py          # http://127.0.0.1:5000, debug off
 ```
 
-Two files, different jobs. `requirements.txt` declares what the app imports —
-Flask, plus Werkzeug because `app.py` imports `secure_filename` and `ProxyFix`
+Three requirements files, three jobs. `requirements.txt` declares what the app
+imports — Flask, plus Werkzeug because `app.py` imports `secure_filename` and
+`ProxyFix`
 from it directly and tests assert their behaviour, while Flask itself only
 requires `werkzeug>=3.1.0`. It uses `~=`, so patch releases including security
 fixes still arrive while minor and major ones are blocked.
@@ -227,6 +229,19 @@ strips the hashes out of the lock, feeds the bare pins to
 `pip install --dry-run -r requirements.txt -c ...`, and fails when the two files
 disagree. Keep that step. Without it, bumping `requirements.txt` and forgetting
 the lock leaves CI green while testing the old version.
+
+`requirements-pip.txt` pins pip itself, hash-checked, and CI installs it before
+anything else. pip is what performs every other verification, and its version
+otherwise comes from whatever the interpreter ships with — four local 3.10-3.13
+installs gave three different pips (23.0.1, 24.0, 25.3), and the runner image is
+no more pinned than that. Only the wheel hash is listed —
+pip is pure Python, so one `py3-none-any` wheel covers every entry, and omitting
+the sdist hash keeps the source-build fallback closed. This shortens the chain to
+the runner's own pip rather than eliminating it: the pip doing the verifying is
+still the unpinned one. Closing that last link means distrusting the runner
+image, which is a different job. A pinned pip does not receive security fixes on
+its own, so bump it deliberately — the version and the digest URL are in the
+file's header.
 
 Runtime knobs, all via environment variables:
 

@@ -1,0 +1,22 @@
+# pip'in kendisi.
+#
+# Asıl kurulumu yapan ve karmaları doğrulayan araç pip; sürümü koşucu
+# imajından geliyordu, yani bağımlılıklar sabitken onları kuran şey değildi.
+# Burada sabitlenip kendi karmasıyla doğrulanıyor:
+#
+#     pip install --only-binary=:all: --require-hashes -r requirements-pip.txt
+#
+# Sınır: bu doğrulamayı henüz sabitlenmemiş olan pip yapıyor. Adım güven
+# zincirini koşucudaki pip'e kadar kısaltıyor, sıfıra indirmiyor - onu da
+# kapatmak koşucu imajına hiç güvenmemeyi gerektirir ki bu ayrı bir iş.
+#
+# Yalnızca tekerlek karması var, sdist'inki bilerek yok: kilit dosyasında
+# olduğu gibi, sdist karmasını listelemek tekerlek tutmadığında kaynaktan
+# derlemeye sessizce düşmenin önünü açıyor. pip saf Python, tek tekerlek
+# (py3-none-any) her platform ve Python sürümü için geçerli.
+#
+# Yenilemek için: sürümü değiştir, karmayı
+# https://pypi.org/pypi/pip/<surum>/json adresindeki .whl digest'inden al.
+# Sabitlenmiş sürüm güvenlik yamalarını otomatik almıyor; elle takip gerekiyor.
+pip==26.2.1 \
+    --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e

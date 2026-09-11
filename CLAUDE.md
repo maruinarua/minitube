@@ -19,6 +19,9 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 ```
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
+test_sandbox.py  Sandbox tests. Skip without ffmpeg/user namespaces.
+sandbox/         ffmpeg isolation subsystem. NOT wired into app.py yet.
+                 See sandbox/README.md for the threat model and layers.
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
 requirements-lock.txt  All 7 resolved versions with sha256 hashes.
@@ -302,8 +305,13 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 128 tests
+python -m unittest -v          # 157 tests (128 app + 29 sandbox)
 ```
+
+The sandbox tests skip when ffmpeg, user namespaces or seccomp are missing —
+which is what CI sees, since the runner has no ffmpeg. Point `FFMPEG_PATH` at
+a binary to run them for real. A green sandbox suite that skipped everything
+is not evidence; check the skip count.
 
 GitHub Actions runs exactly that on every push and pull request against `main`,
 across Python 3.10 through 3.13 (`.github/workflows/tests.yml`). All four are
@@ -381,7 +389,13 @@ Still open. Fix when the task calls for it — flag, don't silently patch, when
 it doesn't:
 
 - **Content is not verified to be video** beyond the extension check — no
-  container/codec sniffing.
+  container/codec sniffing. `sandbox/` exists for the day this changes: it
+  runs ffmpeg under namespaces + seccomp so that a malicious file gets a
+  parser with no network, no host filesystem and a read-only root. It is
+  written and tested but **not called from `app.py`**; wiring it in needs a
+  job queue, because transcoding inside the upload request would block the
+  single-threaded dev server. Don't wire it in as a side effect of another
+  change — `sandbox/README.md` lists what the decision involves.
 - **No total disk quota.** Rate limiting slows disk fill but does not cap it —
   a patient client can still keep uploading within its budget.
 - **IP-based identity** is still only an approximation of a person. Behind a

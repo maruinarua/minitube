@@ -19,8 +19,10 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 ```
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
-test_sandbox.py  Sandbox tests. Skip without ffmpeg/user namespaces.
-sandbox/         ffmpeg isolation subsystem. NOT wired into app.py yet.
+test_sandbox.py  Sandbox tests. The engine ones need no ffmpeg.
+sandbox/         Isolation subsystem. NOT wired into app.py yet.
+                 minisandbox.py is a general namespace sandbox (stdlib only);
+                 ffmpeg_sandbox.py is the ffmpeg-specific policy on top.
                  See sandbox/README.md for the threat model and layers.
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
@@ -305,13 +307,17 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 157 tests (128 app + 29 sandbox)
+python -m unittest -v          # 172 tests (128 app + 44 sandbox)
 ```
 
-The sandbox tests skip when ffmpeg, user namespaces or seccomp are missing —
-which is what CI sees, since the runner has no ffmpeg. Point `FFMPEG_PATH` at
-a binary to run them for real. A green sandbox suite that skipped everything
-is not evidence; check the skip count.
+Only the ffmpeg-specific sandbox tests skip without ffmpeg (9 of them). The
+engine tests use the system shell as their payload, so they run everywhere —
+including CI, where they are the part that actually exercises namespaces and
+seccomp. Point `FFMPEG_PATH` at a binary to run the rest. A green sandbox
+suite that skipped everything is not evidence; check the skip count.
+
+`python -m sandbox.minisandbox --demo` shows the isolation with nothing
+installed. Three real bugs came out of running it — see sandbox/README.md.
 
 GitHub Actions runs exactly that on every push and pull request against `main`,
 across Python 3.10 through 3.13 (`.github/workflows/tests.yml`). All four are

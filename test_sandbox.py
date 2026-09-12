@@ -17,11 +17,16 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
+import time
 import unittest
+import uuid
 
 from sandbox import ffmpeg_sandbox as fs
+from sandbox import minisandbox as ms
 from sandbox import seccomp
 
 
@@ -30,8 +35,8 @@ def _find_ffmpeg():
 
 
 FFMPEG = _find_ffmpeg()
-NAMESPACES_OK = fs._probe_user_namespace() is None
-SECCOMP_OK = fs._probe_seccomp() is None
+NAMESPACES_OK = ms.probe_user_namespace() is None
+SECCOMP_OK = ms.probe_seccomp() is None
 X86_64 = os.uname().machine == "x86_64"
 
 requires_sandbox = unittest.skipUnless(
@@ -41,28 +46,45 @@ requires_sandbox = unittest.skipUnless(
 requires_seccomp = unittest.skipUnless(
     SECCOMP_OK and X86_64, "seccomp ve x86_64 gerekiyor"
 )
+# Motor testleri ffmpeg istemiyor: yük olarak sistemin kendi kabuğu
+# kullanılıyor. CI koşucusunda gerçekten koşan kısım bu.
+requires_engine = unittest.skipUnless(
+    NAMESPACES_OK and SECCOMP_OK and X86_64,
+    "kullanıcı ad alanı, seccomp ve x86_64 gerekiyor",
+)
 
 
-def _run_confined(work, program):
-    """``work``'ü filtre kurulmuş bir çocuk süreçte çalıştırır.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _run_confined(body, allowed=None):
+    """``body``'yi filtre kurulmuş **ayrı bir süreçte** çalıştırır.
 
     Dönüş: ``("signal", isim)`` ya da ``("exit", kod)``. İstisna çıkarsa
     çıkış kodu 42 - bu, "syscall EPERM döndü" ile "süreç öldürüldü" arasını
     ayırmamızı sağlıyor.
+
+    Fork yerine alt süreç kullanılıyor: ağ testleri kabul döngüsü için iş
+    parçacığı açıyor ve çok iş parçacıklı bir süreçte fork etmek, çocukta
+    başka bir iş parçacığının tuttuğu kilitlerle kilitlenme riski taşıyor
+    (Python 3.12 bunu uyarı olarak da söylüyor).
     """
-    pid = os.fork()
-    if pid == 0:
-        try:
-            seccomp.set_no_new_privs()
-            seccomp.install(program)
-            work()
-        except BaseException:
-            os._exit(42)
-        os._exit(0)
-    _, status = os.waitpid(pid, 0)
-    if os.WIFSIGNALED(status):
-        return ("signal", signal.Signals(os.WTERMSIG(status)).name)
-    return ("exit", os.WEXITSTATUS(status))
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {_REPO_ROOT!r})\n"
+        "from sandbox import seccomp\n"
+        f"seccomp.apply_ffmpeg_policy({allowed!r})\n"
+        "try:\n"
+        + textwrap.indent(textwrap.dedent(body), "    ")
+        + "\nexcept BaseException:\n"
+        "    raise SystemExit(42)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, timeout=60
+    )
+    if done.returncode < 0:
+        return ("signal", signal.Signals(-done.returncode).name)
+    return ("exit", done.returncode)
 
 
 class BpfAssemblerTests(unittest.TestCase):
@@ -103,49 +125,49 @@ class BpfAssemblerTests(unittest.TestCase):
 
 @requires_seccomp
 class SeccompEnforcementTests(unittest.TestCase):
-    def setUp(self):
-        self.program = seccomp.build_filter(seccomp.FFMPEG_SYSCALLS)
-
     def test_allowed_syscall_runs(self):
-        self.assertEqual(_run_confined(lambda: os.write(1, b""), self.program),
+        self.assertEqual(_run_confined("import os; os.write(1, b'')"),
                          ("exit", 0))
 
     def test_socket_is_killed(self):
         # Ağ syscall'ları izin listesinde yok: süreç SIGSYS ile ölüyor.
-        kind, detail = _run_confined(socket.socket, self.program)
-        self.assertEqual((kind, detail), ("signal", "SIGSYS"))
+        self.assertEqual(_run_confined("import socket; socket.socket()"),
+                         ("signal", "SIGSYS"))
 
     def test_ptrace_is_killed(self):
-        def work():
-            import ctypes
-            ctypes.CDLL("libc.so.6").ptrace(0, 0, 0, 0)
-
-        self.assertEqual(_run_confined(work, self.program)[0], "signal")
+        self.assertEqual(
+            _run_confined("import ctypes\n"
+                          "ctypes.CDLL('libc.so.6').ptrace(0, 0, 0, 0)")[0],
+            "signal",
+        )
 
     def test_mount_is_killed(self):
-        def work():
-            import ctypes
-            ctypes.CDLL("libc.so.6").mount(b"x", b"/mnt", b"tmpfs", 0, None)
-
-        self.assertEqual(_run_confined(work, self.program)[0], "signal")
+        self.assertEqual(
+            _run_confined("import ctypes\n"
+                          "ctypes.CDLL('libc.so.6')"
+                          ".mount(b'x', b'/mnt', b'tmpfs', 0, None)")[0],
+            "signal",
+        )
 
     def test_fork_is_refused_without_killing(self):
-        # clone CLONE_THREAD olmadan EPERM alıyor, öldürülmüyor: ffmpeg'in
-        # kendi iş parçacığı açması yanlışlıkla ölümcül olmasın diye.
-        self.assertEqual(_run_confined(os.fork, self.program), ("exit", 42))
+        # fork ve clone ikisi de EPERM dönüyor, öldürmüyor: ffmpeg'in kendi
+        # iş parçacığı açması yanlışlıkla ölümcül olmasın diye, ve aynı
+        # niyetin libc'nin seçimine göre farklı sonuçlanmaması için.
+        self.assertEqual(_run_confined("import os; os.fork()"), ("exit", 42))
 
     def test_thread_creation_still_works(self):
         # Bu test clone3 -> ENOSYS düşürmesini koruyor. O olmadan glibc
         # clone3 çağırıyor ve iş parçacığı açan her süreç SIGSYS alıyor.
-        def work():
-            done = []
-            thread = threading.Thread(target=lambda: done.append(1))
-            thread.start()
-            thread.join()
-            if not done:
-                raise RuntimeError("iş parçacığı çalışmadı")
-
-        self.assertEqual(_run_confined(work, self.program), ("exit", 0))
+        self.assertEqual(
+            _run_confined(
+                "import threading\n"
+                "done = []\n"
+                "t = threading.Thread(target=lambda: done.append(1))\n"
+                "t.start(); t.join()\n"
+                "assert done, 'iş parçacığı çalışmadı'\n"
+            ),
+            ("exit", 0),
+        )
 
 
 class ArgumentBuildingTests(unittest.TestCase):
@@ -207,7 +229,7 @@ class PolicyValidationTests(unittest.TestCase):
         with self.assertRaises(fs.SandboxError):
             fs.transcode(self.source, os.path.join(self.tmp, "o.mp4"), policy=policy)
 
-    @unittest.skipIf(fs.apparmor_enabled(), "AppArmor bu makinede etkin")
+    @unittest.skipIf(ms.apparmor_enabled(), "AppArmor bu makinede etkin")
     def test_apparmor_request_without_apparmor_fails_closed(self):
         # Yazma başarılı dönse bile profil uygulanmıyorsa çalıştırmıyoruz:
         # AppArmor'suz çekirdekte /proc/self/attr/exec duruyor ve yazma
@@ -220,6 +242,214 @@ class PolicyValidationTests(unittest.TestCase):
         with self.assertRaises(fs.SandboxError):
             fs.transcode(self.source, target, policy=policy)
         self.assertFalse(os.path.exists(target), "çıktı üretilmemeliydi")
+
+
+@requires_engine
+class EngineTests(unittest.TestCase):
+    """Motorun kendisi - ffmpeg gerekmiyor.
+
+    Yük olarak sistemin kendi kabuğu kullanılıyor; tek ihtiyacı libc ve ELF
+    yükleyicisi, ikisi de her Linux'ta var. CI koşucusunda gerçekten koşan
+    kısım bu: ffmpeg'e bağlı testler orada atlanıyor, bunlar atlanmıyor.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        shell = shutil.which("sh")
+        if shell is None:
+            raise unittest.SkipTest("kabuk bulunamadı")
+        cls.shell = os.path.realpath(shell)
+        cls.libraries = ms.shared_libraries(cls.shell)
+        # Kabuğun syscall kümesi strace ile ölçüldü: ffmpeg'inkiyle
+        # neredeyse aynı, farkı yalnızca süreç grubu sorguları.
+        cls.syscalls = list(seccomp.FFMPEG_SYSCALLS) + ["getppid", "getpgrp"]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="engine-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _sh(self, script, **kwargs):
+        kwargs.setdefault("syscalls", self.syscalls)
+        kwargs.setdefault("timeout", 60)
+        ro_binds = [self.shell] + self.libraries + list(kwargs.pop("ro_binds", []))
+        return ms.run([self.shell, "-c", script], ro_binds=ro_binds, **kwargs)
+
+    def test_command_runs_and_stdout_comes_back(self):
+        done = self._sh("echo merhaba")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), b"merhaba")
+
+    def test_root_is_read_only(self):
+        done = self._sh("echo x > /kacis")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn(b"Read-only file system", done.stderr)
+        self.assertFalse(os.path.exists("/kacis"))
+
+    def test_host_filesystem_is_invisible(self):
+        done = self._sh(
+            "if [ -r /etc/passwd ]; then echo GORUNUYOR; else echo yok; fi"
+        )
+        self.assertEqual(done.stdout.strip(), b"yok")
+
+    def test_proc_is_not_mounted(self):
+        done = self._sh("if [ -d /proc/1 ]; then echo VAR; else echo yok; fi")
+        self.assertEqual(done.stdout.strip(), b"yok")
+
+    def test_writable_bind_works_and_stays_inside(self):
+        out_dir = os.path.join(self.tmp, "out")
+        os.mkdir(out_dir)
+        done = self._sh("echo veri > /out/dosya", rw_binds=[(out_dir, "/out")])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(os.path.join(out_dir, "dosya")) as handle:
+            self.assertEqual(handle.read().strip(), "veri")
+
+    def test_dev_null_is_a_working_character_device(self):
+        # Demoda bulunan hata: /dev olmadan "2>/dev/null" gibi çok yaygın bir
+        # deyim kırılıyor ve suç sandbox'a yıkılıyor.
+        #
+        # Yalnızca "komut yine de tamamlandı" demek yetmiyor: /dev hiç
+        # yokken de tamamlanıyor, sadece stderr'e hata düşüyor. O yüzden
+        # aygıt olduğunu ve yönlendirmenin sessiz kaldığını sınıyoruz.
+        done = self._sh("if [ -c /dev/null ]; then echo AYGIT; else echo yok; fi")
+        self.assertEqual(done.stdout.strip(), b"AYGIT")
+        quiet = self._sh("echo gurultu 2>/dev/null")
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertEqual(quiet.stderr, b"", "yönlendirme sessiz kalmalıydı")
+
+    def test_writable_bind_is_not_executable(self):
+        # Saldırgan yazabildiği tek yere bir yük bırakırsa çalıştıramamalı.
+        # Yükü ana makineden koyuyoruz: içeride kopyalamak harici komut,
+        # o da fork gerektirir ve fork zaten yasak.
+        out_dir = os.path.join(self.tmp, "out")
+        os.mkdir(out_dir)
+        planted = os.path.join(out_dir, "yuk")
+        shutil.copy(self.shell, planted)
+        os.chmod(planted, 0o755)
+        # "exec" fork etmiyor, süreci yerine koyuyor - yani bu deneme
+        # seccomp'un fork yasağına takılmadan noexec'i sınıyor.
+        done = self._sh("exec /out/yuk -c 'echo CALISTI'",
+                        rw_binds=[(out_dir, "/out")])
+        self.assertNotIn(b"CALISTI", done.stdout)
+        self.assertIn(b"denied", done.stderr.lower())
+
+    def test_process_id_namespace_is_separate(self):
+        # Yeni PID ad alanında ilk süreç 1 numara. Ana makinenin PID'lerini
+        # görüyor olsaydı burası büyük bir sayı olurdu.
+        done = self._sh("echo $$")
+        self.assertEqual(done.stdout.strip(), b"1")
+
+    def test_helper_process_cannot_be_spawned(self):
+        # fork ve clone ikisi de reddediliyor, ikisi de EPERM - öldürme yok,
+        # yani kabuk hatayı bildirebiliyor.
+        done = self._sh("/bin/true; echo CALISTI")
+        self.assertNotIn(b"CALISTI", done.stdout)
+        self.assertIn(b"ork", done.stderr)  # "Cannot fork"
+
+    def test_network_namespace_is_empty(self):
+        # seccomp bilerek gevşetiliyor: soket açmak serbest, yine de
+        # bağlanılamamalı. Katmanı tek başına ölçen test bu.
+        #
+        # Yük bash: /dev/tcp yönlendirmesi bash'e özgü ve fazladan bir ikili
+        # (netcat, curl) gerektirmeden soket açmanın tek yolu. dash'te yok.
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash bulunamadı (/dev/tcp gerekiyor)")
+        bash = os.path.realpath(bash)
+        bash_libraries = ms.shared_libraries(bash)
+
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(4)
+        self.addCleanup(server.close)
+        port = server.getsockname()[1]
+        hits = []
+
+        def accept_loop():
+            while True:
+                try:
+                    connection, _ = server.accept()
+                except OSError:
+                    return
+                hits.append(1)
+                connection.close()
+
+        threading.Thread(target=accept_loop, daemon=True).start()
+        script = f"exec 3<>/dev/tcp/127.0.0.1/{port} && echo ACIK || echo kapali"
+
+        # Temel çizgi: aynı betik sandbox dışında bağlanabiliyor mu? Bu
+        # olmadan test hiçbir şey kanıtlamaz - sadece bash'in beceriksiz
+        # olduğunu gösterirdi.
+        baseline = subprocess.run([bash, "-c", script],
+                                  capture_output=True, timeout=30)
+        self.assertIn(b"ACIK", baseline.stdout, "temel çizgi kurulamadı")
+        self.assertEqual(len(hits), 1)
+        hits.clear()
+
+        relaxed = self.syscalls + list(seccomp.NETWORK_SYSCALLS)
+        done = ms.run([bash, "-c", script],
+                      ro_binds=[bash] + bash_libraries,
+                      syscalls=relaxed, timeout=60)
+        self.assertEqual(hits, [], "sandbox içinden ağa çıkıldı")
+        self.assertNotIn(b"ACIK", done.stdout)
+
+    def test_timeout_kills_the_command(self):
+        with self.assertRaises(ms.SandboxTimeout):
+            # Meşgul döngü: fork gerektirmiyor, kendiliğinden de bitmiyor.
+            self._sh("while : ; do : ; done", timeout=2)
+
+    def test_timeout_leaves_no_surviving_process(self):
+        """Zaman aşımı gerçekten öldürmeli, yalnızca beklemeyi bırakmamalı.
+
+        Bu bir regresyon testi: önceki sürüm zaman aşımında yalnızca
+        ``unshare``'i öldürüyordu ve yük hayatta kalıp CPU yakmaya devam
+        ediyordu (ana makinede PID 1'e evlat edinilmiş hâlde ölçüldü).
+
+        Belirteç çalışma anında üretiliyor. Sabit bir dize kullanmak
+        yanıltıcı olurdu: aynı dize testi başlatan kabuğun komut satırında da
+        geçer ve kendi harness'ımızı sızıntı sanardık - bir kez öyle oldu.
+        """
+        marker = "sandbox-test-" + uuid.uuid4().hex
+
+        def survivors():
+            found = []
+            mine = {str(os.getpid()), str(os.getppid())}
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit() or entry in mine:
+                    continue
+                try:
+                    with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                        if marker.encode() in handle.read():
+                            found.append(entry)
+                except OSError:
+                    pass
+            return found
+
+        self.assertEqual(survivors(), [], "belirteç zaten kullanımda")
+        with self.assertRaises(ms.SandboxTimeout):
+            self._sh(f": {marker}; while : ; do : ; done", timeout=2)
+        # Öldürme eşzamansız; çekirdeğin süreci kaldırmasına biraz süre ver.
+        for _ in range(20):
+            if not survivors():
+                break
+            time.sleep(0.1)
+        self.assertEqual(survivors(), [], "yük zaman aşımından sağ çıktı")
+
+    def test_no_mounts_leak_to_the_host(self):
+        self._sh("echo x")
+        with open("/proc/self/mountinfo") as handle:
+            self.assertNotIn("minisandbox", handle.read())
+
+    def test_capabilities_are_probed_without_confining_the_caller(self):
+        # Yetenek denemesi filtreyi çocuk süreçte kuruyor; test koşucusunun
+        # kendisi kısıtlanmış olsaydı sonraki testler ölürdü.
+        self.assertIsNone(ms.probe_seccomp())
+        self.assertEqual(socket.socket().close(), None)
+
+    def test_relative_bind_target_is_rejected(self):
+        with self.assertRaises(ms.SandboxError):
+            ms.run([self.shell, "-c", "true"],
+                   ro_binds=[(self.shell, "goreli/yol")])
 
 
 @requires_sandbox
@@ -244,26 +474,17 @@ class SandboxEndToEndTests(unittest.TestCase):
     def setUp(self):
         self.policy = fs.Policy(ffmpeg_path=FFMPEG)
 
-    def _raw_run(self, argv, **overrides):
-        """Genel API'yi atlayıp ad alanı katmanını tek başına sınar."""
+    def _raw_run(self, argv, syscalls=None):
+        """Genel API'yi atlayıp sandbox katmanlarını tek başına sınar.
+
+        ``transcode()`` argümanları kendisi üretiyor; burada verilen argv
+        doğrudan çalıştırılıyor, böylece 2. katmanı (protokol kısıtı)
+        atlayıp alttaki katmanların tek başına ne yaptığı görülebiliyor.
+        """
         out_dir = tempfile.mkdtemp(dir=self.tmp)
-        spec = {
-            "ffmpeg": FFMPEG,
-            "input": self.source,
-            "out_dir": out_dir,
-            "argv": [fs._FFMPEG_PATH] + argv,
-            "limits": {
-                "memory_bytes": self.policy.memory_bytes,
-                "cpu_seconds": self.policy.cpu_seconds,
-                "max_output_bytes": self.policy.max_output_bytes,
-                "max_open_files": self.policy.max_open_files,
-            },
-            "tmpfs_bytes": self.policy.tmpfs_bytes,
-            "apparmor_profile": None,
-            "syscalls": self.policy.syscalls,
-        }
-        spec.update(overrides)
-        return fs._run_stage2(spec, self.policy)
+        policy = fs.Policy(ffmpeg_path=FFMPEG, syscalls=syscalls)
+        return fs.run_ffmpeg([fs._FFMPEG_PATH] + argv, self.source, out_dir,
+                             policy)
 
     def _listener(self):
         """127.0.0.1'de kayıt tutan bir dinleyici açar, vuruş listesini döner."""
@@ -372,24 +593,13 @@ class SandboxEndToEndTests(unittest.TestCase):
 
     def test_wall_clock_timeout_kills_the_job(self):
         policy = fs.Policy(ffmpeg_path=FFMPEG, wall_clock_seconds=3)
-        spec_argv = ["-nostdin", "-hide_banner", "-loglevel", "error",
-                     "-protocol_whitelist", "file", "-stream_loop", "2000",
-                     "-f", "mp4", "-i", fs._IN_PATH,
-                     "-c:v", "libx264", "-preset", "placebo", "-y", "/out/o.mp4"]
+        argv = [fs._FFMPEG_PATH, "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-protocol_whitelist", "file", "-stream_loop", "2000",
+                "-f", "mp4", "-i", fs._IN_PATH,
+                "-c:v", "libx264", "-preset", "placebo", "-y", "/out/o.mp4"]
         out_dir = tempfile.mkdtemp(dir=self.tmp)
-        spec = {
-            "ffmpeg": FFMPEG, "input": self.source, "out_dir": out_dir,
-            "argv": [fs._FFMPEG_PATH] + spec_argv,
-            "limits": {
-                "memory_bytes": policy.memory_bytes,
-                "cpu_seconds": policy.cpu_seconds,
-                "max_output_bytes": policy.max_output_bytes,
-                "max_open_files": policy.max_open_files,
-            },
-            "tmpfs_bytes": policy.tmpfs_bytes, "apparmor_profile": None,
-        }
         with self.assertRaises(fs.TranscodeError):
-            fs._run_stage2(spec, policy)
+            fs.run_ffmpeg(argv, self.source, out_dir, policy)
 
     def test_no_mounts_leak_to_the_host(self):
         fs.transcode(self.source, os.path.join(self.tmp, "sizinti.mp4"),

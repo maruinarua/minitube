@@ -63,7 +63,8 @@ SYSCALLS_X86_64 = {
     "execve": 59, "exit": 60, "uname": 63, "fcntl": 72, "fsync": 74,
     "ftruncate": 77, "getcwd": 79, "rename": 82, "mkdir": 83, "unlink": 87,
     "readlink": 89, "sysinfo": 99, "getuid": 102, "getgid": 104, "geteuid": 107,
-    "getegid": 108, "sigaltstack": 131, "arch_prctl": 158, "gettid": 186,
+    "getegid": 108, "getppid": 110, "getpgrp": 111, "sigaltstack": 131,
+    "arch_prctl": 158, "gettid": 186,
     "time": 201, "futex": 202, "sched_getaffinity": 204, "getdents64": 217,
     "set_tid_address": 218, "restart_syscall": 219, "fadvise64": 221,
     "clock_gettime": 228, "clock_getres": 229, "clock_nanosleep": 230,
@@ -226,7 +227,16 @@ def build_filter(
 
     clone_nr = table.get("clone")
     clone3_nr = table.get("clone3")
-    special = {clone_nr, clone3_nr} if thread_only_clone else set()
+    # fork ve vfork'un bayrağı yok: her zaman yeni bir süreç demek, yani
+    # koşulsuz reddediliyorlar. Öldürmek yerine EPERM, clone ile tutarlı
+    # olsun diye - aynı niyetin (süreç açmak) libc'nin hangi syscall'ı
+    # seçtiğine göre bir öldürme bir hata dönmesi kafa karıştırıcıydı.
+    # Demoda görüldü: kabuk fork çağırınca betik ortasında SIGSYS ile
+    # ölüyordu, clone çağırsa "cannot fork" deyip devam edecekti.
+    fork_numbers = [
+        table[name] for name in ("fork", "vfork") if name in table
+    ] if thread_only_clone else []
+    special = {clone_nr, clone3_nr, *fork_numbers} if thread_only_clone else set()
     numbers = sorted({table[name] for name in allowed_names} - special)
 
     asm = _Assembler()
@@ -245,6 +255,8 @@ def build_filter(
         asm.jeq(clone_nr, jt="clone_check", jf=0)
     if thread_only_clone and clone3_nr is not None:
         asm.jeq(clone3_nr, jt="clone3_enosys", jf=0)
+    for number in fork_numbers:
+        asm.jeq(number, jt="deny_clone", jf=0)
 
     for number in numbers:
         asm.jeq(number, jt="allow", jf=0)

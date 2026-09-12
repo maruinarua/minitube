@@ -30,16 +30,39 @@ playlist/concat özellikleri girdi dosyasının başka dosyalara ya da URL'lere
 referans vermesine izin veriyor. Bu, doğrudan yerel dosya okuma ve SSRF
 demek. 2. katman bunu kapatıyor.
 
+## Paket düzeni
+
+| Dosya | İş |
+|---|---|
+| `minisandbox.py` | İzolasyon motoru. ffmpeg'den bağımsız, herhangi bir komutu çalıştırıyor. Yalnızca stdlib. |
+| `seccomp.py` | BPF filtresi üretip kuruyor. libseccomp yok. |
+| `ffmpeg_sandbox.py` | ffmpeg'e özgü politika: argümanlar, kapsayıcılar, çıktı doğrulaması. |
+| `apparmor/minitube-ffmpeg` | AppArmor profili (bu makinede doğrulanamadı). |
+
+Motorun ayrı olmasının pratik bir nedeni var: ffmpeg kurulu olmayan bir
+makinede de sınanabiliyor. Yük olarak sistemin kendi kabuğu kullanılıyor,
+tek ihtiyacı libc ve ELF yükleyicisi. CI koşucusunda gerçekten koşan kısım
+bu - ffmpeg'e bağlı testler orada atlanıyor.
+
+Hiçbir şey kurmadan denemek için:
+
+```bash
+python -m sandbox.minisandbox --demo
+python -m sandbox.minisandbox --check
+python -m sandbox.minisandbox --with-libs /bin/sh -c 'echo merhaba'
+```
+
 ## Katmanlar
 
 | # | Katman | Ne engelliyor | Nasıl doğrulandı |
 |---|---|---|---|
 | 1 | Ayrı süreç | ffmpeg belleğindeki bir hata Flask işçisinin adres alanına (`.secret_key`, oturum anahtarı) erişemiyor | tasarım gereği: kütüphane bağlaması yok, `execve` |
 | 2 | Protokol/demuxer kısıtı | `concat:`/`http:` üzerinden dosya okuma ve SSRF; sahte konteyner | `test_disguised_container_is_rejected` |
-| 3 | Ad alanları (user/mount/pid/net/ipc/uts) | Veri sızdırma, ana makine dosyaları, başka süreçlere sinyal | `test_network_namespace_blocks_on_its_own` |
-| 4 | Minimal salt okunur kök | Yük bırakacak yer, kabuk, `/etc`, `/proc` | `test_writing_outside_the_output_directory_fails` |
+| 3 | Ad alanları (user/mount/pid/net/ipc/uts) | Veri sızdırma, ana makine dosyaları, başka süreçlere sinyal | `test_network_namespace_is_empty`, `test_process_id_namespace_is_separate` |
+| 4 | Minimal salt okunur kök | Yük bırakacak yer, kabuk, `/etc`, `/proc` | `test_root_is_read_only`, `test_writable_bind_is_not_executable` |
 | 5 | Seccomp izin listesi | Ağ, süreç çatallama, ptrace, mount, bpf | `SeccompEnforcementTests` |
-| 6 | Kaynak sınırları | Bellek bombası, sonsuz kodlama, disk doldurma | `test_wall_clock_timeout_kills_the_job` |
+| 6 | Kaynak sınırları | Bellek bombası, sonsuz kodlama, disk doldurma | `test_timeout_kills_the_command`, `test_timeout_leaves_no_surviving_process` |
+| 6b | Minimal `/dev` | - (işlevsellik) | `test_dev_null_is_a_working_character_device` |
 | 7 | AppArmor (opsiyonel) | `execve` — seccomp'un kapatamadığı boşluk | **doğrulanmadı**, aşağıya bakın |
 | 8 | Çıktı doğrulaması | Beklenmeyen/çok büyük çıktı, yarım dosya | `_validate_output` |
 
@@ -117,10 +140,13 @@ Varsayılan ölçülerek seçildi. Gerçek bellek tavanı isteniyorsa doğru ara
 cgroup `memory.max`; o da devredilmiş bir cgroup ağacı gerektiriyor ve bu
 paketin kapsamında değil.
 
-Duvar saati sınırı `unshare --kill-child` ile birlikte çalışıyor: zaman
-aşımında `unshare` öldürülüyor, o da PID ad alanının 1 numaralı sürecini
-götürüyor, o da içerideki her şeyi. Ölçüldü: 3 saniyelik sınır 3.0 saniyede
-kesiyor, geride süreç ya da mount kalmıyor.
+Duvar saati sınırında süreç kendi oturumunda başlatılıp grup komple
+öldürülüyor. Bunun gerekçesi somut: önceki sürümde zaman aşımı yalnızca
+`unshare`'i öldürüyordu ve meşgul döngüdeki yük her koşuda hayatta kalıp CPU
+yakmaya devam ediyordu. Hangi değişikliğin tek başına yettiğini izole
+edemedim - kısmi geri almalarla sızıntıyı yeniden üretemedim - o yüzden
+burada bir mekanizma suçlanmıyor; istenen davranış açıkça kuruluyor ve
+`test_timeout_leaves_no_surviving_process` onu koruyor.
 
 ## Fail-closed
 
@@ -171,6 +197,28 @@ Başka bir mimariye taşımak için `seccomp.SYSCALLS_X86_64` tablosunun ve
 `AUDIT_ARCH_X86_64` sabitinin o mimari için karşılığı gerekiyor. Yanlış
 mimaride filtre kurmak sessizce yanlış syscall'lara izin vereceği için
 `build_filter` mimari uyuşmazlığında süreci öldürüyor.
+
+## Demo neyin ortaya çıkardı
+
+Motoru ffmpeg'den ayırıp çıplak bir kabukla denemek üç hata gösterdi. Üçü de
+ffmpeg ile fark edilmemişti, çünkü ffmpeg o yolları hiç kullanmıyor:
+
+1. **`/dev` yoktu.** `2>/dev/null` gibi çok yaygın bir deyim kırılıyordu ve
+   suç sandbox'a yıkılıyordu. Artık minimal bir `/dev` bağlanıyor -
+   `MS_NODEV` **olmadan**, yoksa çekirdek aygıt semantiğini yok sayar ve
+   `/dev/null` sıradan bir dosya gibi davranır.
+2. **`fork` ile `clone` farklı sonuçlanıyordu.** Aynı niyet (süreç açmak)
+   libc'nin hangi syscall'ı seçtiğine göre bir öldürme bir `EPERM`
+   veriyordu. İkisi de artık `EPERM`.
+3. **Zaman aşımı yükü öldürmüyordu.** Meşgul döngüdeki kabuk her koşuda
+   hayatta kalıp CPU yakmaya devam ediyordu. Artık yeni oturum açılıp grup
+   komple öldürülüyor ve bir regresyon testi bunu koruyor.
+
+Ayrıca ölçüm sırasında iki kez kendi harness'ım yanılttı: bir kez sandbox
+dışında çalıştırdığım betiğin yazdığı dosyayı "kaçış" sandım, bir kez de
+sızıntı belirtecim kendi kabuk komut satırımda geçtiği için kendi
+harness'ımı sızıntı saydım. İkisi de aynı dersi veriyor - bir güvenlik
+testinin önce *temel çizgisi* kurulmalı, yoksa neyi ölçtüğü belirsiz.
 
 ## Kalan riskler
 

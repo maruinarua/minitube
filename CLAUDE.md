@@ -310,11 +310,14 @@ The test suite is stdlib only — no runner to install:
 python -m unittest -v          # 172 tests (128 app + 44 sandbox)
 ```
 
-Only the ffmpeg-specific sandbox tests skip without ffmpeg (9 of them). The
-engine tests use the system shell as their payload, so they run everywhere —
-including CI, where they are the part that actually exercises namespaces and
-seccomp. Point `FFMPEG_PATH` at a binary to run the rest. A green sandbox
-suite that skipped everything is not evidence; check the skip count.
+Sandbox tests skip in layers, and **the skip count is the thing to read** — a
+green suite that skipped everything is not evidence. Locally, 9 skip without
+ffmpeg. On a GitHub runner it was 25: Ubuntu 24.04 restricts unprivileged user
+namespaces through AppArmor, so every namespace-based test skipped too and CI's
+green said nothing about the sandbox. The workflow now clears that sysctl
+before the suite; if a runner refuses, the tests skip rather than fail, so
+check the count instead of trusting the colour. Point `FFMPEG_PATH` at a binary
+to run the ffmpeg-specific ones.
 
 `python -m sandbox.minisandbox --demo` shows the isolation with nothing
 installed. Three real bugs came out of running it — see sandbox/README.md.

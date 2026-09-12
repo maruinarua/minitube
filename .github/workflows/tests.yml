@@ -39,6 +39,21 @@ jobs:
           pip install --only-binary=:all: --require-hashes -r requirements-pip.txt
           pip --version
 
+      - name: Ayrıcalıksız kullanıcı ad alanlarını aç
+        # Ubuntu 24.04 koşucuları ayrıcalıksız user namespace'leri AppArmor
+        # ile kısıtlıyor. Bu olmadan sandbox motor testlerinin tamamı
+        # atlanıyor - ölçüldü: 25 atlama, 15'i motor. O hâlde CI'daki yeşil
+        # sandbox hakkında hiçbir şey söylemiyor.
+        #
+        # "|| true": kısıtlama olmayan ya da sysctl'e izin vermeyen bir
+        # koşucuda adım kırılmasın; testler zaten yetenek yoksa atlıyor.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces)"
+          unshare --user --map-root-user --net true \
+            && echo "kullanıcı ad alanı: CALISIYOR" \
+            || echo "kullanıcı ad alanı: YOK (motor testleri atlanacak)"
+
       - name: Kilit requirements.txt ile tutarlı mı
         # Kurulum kilitten yapıldığı için, requirements.txt güncellenip kilit
         # unutulursa CI eski sürümü test eder ve bunu fark etmezdik. Burada

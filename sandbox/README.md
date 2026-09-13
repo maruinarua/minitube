@@ -156,11 +156,71 @@ Bulgu: **bazı syscall numaraları hiçbir seccomp filtresine uğramıyor** ve
 hangileri olduğu makineye göre değişiyor. Bu deponun geliştirildiği
 çekirdekte 335 ve 336; GitHub koşucusunda yalnızca 335. İki ayrı makinede
 ölçüldü ve sabit bir istisna listesinin neden yanlış olacağını da bu
-gösteriyor - iki makineden birinde mutlaka hatalı olurdu. Filtresiz koşuda 335 SIGILL, 336 ENXIO veriyor -
-yani ikisi de bu platforma özgü. Filtrenin mantığı doğru: Python'da yazılmış
-küçük bir BPF yorumlayıcısı 336 için `KILL` döndürüyor, yani program doğru,
-çekirdek onu uygulamıyor. Nedenini çözemedim ve uydurmuyorum; test bunu
-gizlemek yerine görünür kılıyor.
+gösteriyor - iki makineden birinde mutlaka hatalı olurdu.
+
+#### 335 ve 336 ne
+
+İlk turda bu "nedeni çözülemedi" diye bırakılmıştı. Sonradan ölçüldü;
+aşağıdakilerin hepsi depo kodundan bağımsız, tek dosyalık C programlarıyla
+yeniden üretildi.
+
+**Bu numaralar boşluk değil, uygulanmış çağrılar.** Gerçekten tahsis
+edilmemiş bir komşu (337) `ENOSYS` veriyor. 335 ve 336 vermiyor:
+
+| numara | filtre yok | varsayılan `ERRNO(EPERM)` | varsayılan `KILL_PROCESS` |
+|---|---|---|---|
+| 334 (`rseq`) | EINVAL | **EPERM** | **SIGSYS** |
+| 335 | SIGILL | SIGILL | SIGILL |
+| 336 | ENXIO | ENXIO | ENXIO |
+| 337 (tahsissiz) | ENOSYS | **EPERM** | **SIGSYS** |
+
+Aynı süreçte, tek ve canlı bir filtreyle ölçüldü, yani "filtre kurulmamıştı"
+ihtimali yok: 334 ve 337 filtreye takılırken 335/336 takılmıyor. `prctl` ve
+`seccomp(2)+TSYNC` yollarının ikisinde de aynı.
+
+**Atlanan şey yalnızca seccomp.** `PTRACE_SYSCALL` bu iki numara için giriş
+ve çıkış duraklarını normal şekilde veriyor (`orig_rax` = 335/336). Yani
+genel syscall giriş yolu işliyor, atlanan katman seccomp'a özgü.
+
+**335'i öldüren şey filtre değil, çağrının kendi uygulaması.** SIGILL
+yakalanıp `siginfo` okunduğunda `si_code = SI_KERNEL`, `si_addr = 0` çıkıyor -
+bu, çekirdeğin `force_sig(SIGILL)` çağırdığı anlamına gelir, CPU'nun geçersiz
+komuta takılması değil. `strace` altında dönüş değeri de görünüyor: düz `-1`
+(strace bunu `EPERM` diye yazıyor, çünkü `EPERM == 1`). Yani uygulama
+"sinyal gönder ve -1 dön" şeklinde.
+
+**Muhtemelen `uretprobe` ve `uprobe`.** Çekirdek imajında tam olarak bu iki
+yeni x86_64 çağrısı var:
+
+```
+$ grep -E '__x64_sys_u(ret)?probe' /proc/kallsyms
+ffffffff812aef00 T __x64_sys_uretprobe
+ffffffff812af160 T __x64_sys_uprobe
+```
+
+Bunlar "gerçek" syscall değil, uprobe trampolininden çağrılmak üzere var
+olan giriş noktaları; trampolin bağlamı dışında çağrıldıklarında çağıranı
+reddetmeleri beklenir - ölçülen davranış (335 çağıranı öldürüyor, 336 "böyle
+bir aygıt yok" diyor) buna uyuyor. Koşucudaki daha eski çekirdekte yalnızca
+335'in anormal olması da uyuyor: `uretprobe` önce, `uprobe` sonra eklendi.
+
+Bunu **çıkarım** olarak yazıyorum, kanıt olarak değil: numara→ad eşleşmesini
+çekirdek kaynağından doğrulayamadım (bu ortamda dış ağ kapalı, `/proc/kcore`
+yok, `sys_call_table` kallsyms'te görünmüyor, kurulu `strace` 6.8 bu adları
+henüz bilmiyor ve `syscall_0x14f` yazıyor). Seccomp'un neden özellikle bu iki
+numarayı atladığını da kaynaktan okuyup doğrulayamadım.
+
+**Güvenlik açısından ne anlama geliyor.** Filtrenin "izin listesi dışında
+hiçbir şey geçmez" güvencesinin ölçülmüş bir istisnası var. Ama istisna
+sömürülebilir değil: iki çağrıdan biri çağıranı öldürüyor (sandbox'ta zaten
+istenen sonuç), diğeri hata dönüyor. 336'nın anlamlı bir iş yapması için
+adres uzayında bir uprobe trampolini bulunması gerekir; onu kurmak
+`perf_event_open` veya `bpf` ister ve ikisi de izin listesinde **değil**.
+Yani içerideki bir yük bu numaralarla yeni bir yetenek kazanmıyor.
+
+Filtrenin mantığı da doğru: Python'da yazılmış küçük bir BPF yorumlayıcısı
+336 için `KILL` döndürüyor. Program doğru, çekirdek onu bu iki numara için
+uygulamıyor.
 
 Test bu yüzden sabit bir istisna listesi yazmıyor - yazsaydı iki
 makineden birinde yanlış olurdu. Temel çizgi, **aynı

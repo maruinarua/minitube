@@ -228,8 +228,12 @@ class SyscallSweepTests(unittest.TestCase):
         bu çekirdekte iki numara (335, 336) **hiçbir** seccomp filtresine
         uğramıyor - her şeyi reddeden filtrede bile hayatta kalıyorlar ve
         filtresiz koşuda da aynı sonucu veriyorlar. Bu ortamın özelliği,
-        filtrenin hatası değil. Temel çizgiyle karşılaştırma bunu kendi
-        kendine soğuruyor ve testi başka çekirdeklerde de doğru tutuyor.
+        filtrenin hatası değil: aynı süreçte canlı bir filtreyle ölçüldüğünde
+        komşuları (334, 337) takılırken bu ikisi takılmıyor, ama ptrace
+        ikisini de görüyor - yani atlanan katman seccomp'a özgü. Hangi
+        numaraların böyle olduğu çekirdeğe göre değişiyor; ayrıntı ve ölçüm
+        sandbox/README.md'de. Temel çizgiyle karşılaştırma bunu kendi kendine
+        soğuruyor ve testi başka çekirdeklerde de doğru tutuyor.
         """
         allowed = {_TABLE[n] for n in seccomp.FFMPEG_SYSCALLS}
         # eperm/enosys de reddetmedir: fork/vfork ve clone3 bilerek böyle.
@@ -267,6 +271,10 @@ class SyscallSweepTests(unittest.TestCase):
 
         Test kırmıyor - ortamın özelliği, deponun hatası değil. Ama sessiz
         kalmak da doğru değil: seccomp'a güvenen biri bunu bilmeli.
+
+        Ölçülen numaralar (335/336) yeni bir yetenek vermiyor - biri çağıranı
+        öldürüyor, diğeri hata dönüyor - ama bunu doğrulamak okuyucunun işi
+        olmasın diye README'de gerekçesiyle yazılı.
         """
         escaped = sorted(nr for nr, status in self.baseline.items()
                          if status not in ("sigsys", "eperm", "enosys",

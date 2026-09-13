@@ -39,6 +39,10 @@ demek. 2. katman bunu kapatıyor.
 | `ffmpeg_sandbox.py` | ffmpeg'e özgü politika: argümanlar, kapsayıcılar, çıktı doğrulaması. |
 | `apparmor/minitube-ffmpeg` | AppArmor profili. Sözdizimi ve uygulanışı CI'da sınanıyor. |
 | `apparmor/selftest` | Yalnızca sınama için iki profil: biri izin veren, biri boş. |
+| `native/mt_seccomp.c` | BPF üreticisinin C uygulaması + filtre kurma (TSYNC dahil). |
+| `native/mt_exec_once.c` | `execve`'yi sayan çalıştırıcı: ilkine izin, sonrakine hayır. |
+| `native/mt_sweep.c` | Syscall uzayını baştan sona tarayan sınama aracı. |
+| `native/__init__.py` | C tarafını tembel derleyen ve yükleyen sarmalayıcı. |
 
 Motorun ayrı olmasının pratik bir nedeni var: ffmpeg kurulu olmayan bir
 makinede de sınanabiliyor. Yük olarak sistemin kendi kabuğu kullanılıyor,
@@ -74,6 +78,111 @@ yazdıktan sonra `--net` bayrağını kaldıran bir mutasyon denendi ve test
 öldürüyordu. Bu yüzden `test_network_namespace_blocks_on_its_own` seccomp'u
 bilerek gevşetip ad alanını tek başına sınıyor. Her katman ayrı ayrı
 kanıtlanmadıysa, aslında kaç katmanınız olduğunu bilmiyorsunuz.
+
+## C tarafı: neden var
+
+`python -m sandbox.native` ile derleniyor, **zorunlu değil**: yoksa her şey
+Python uygulamasına düşüyor ve depo çalışma zamanında derleyici
+gerektirmiyor. İki şey için var.
+
+### 1. Diferansiyel doğrulama
+
+`mt_seccomp.c`, Python'daki `build_filter()` ile **birebir aynı** baytları
+üretiyor. Amaç hız değil. Elle yazılmış bir BPF birleştiricisinde sessiz bir
+hata - kayan bir etiket, sığmayan bir atlama, izin listesine yanlışlıkla
+eklenmiş bir numara - ya çalışan programı öldürür ya da izolasyonda delik
+bırakır, ve ikisi de normal testte kolayca gözden kaçar. İki bağımsız
+uygulamayı bayt bayt karşılaştırmak o sınıfı yakalıyor: aynı hatayı iki kez
+yapmak, bir kez yapmaktan çok daha zor.
+
+Mutasyonla ölçüldü: Python tarafında izin listesine sessizce `socket`
+eklemek `test_c_and_python_filters_are_identical`'ı kırıyor.
+
+### 2. `execve` boşluğunun kapanması
+
+Daha önce bu belgede "seccomp bunu ifade edemiyor, AppArmor kapatıyor"
+yazıyordu. Artık seccomp da kapatabiliyor.
+
+Filtre exec'ten *önce* kurulduğu için `execve` izin listesinde kalmak
+zorunda; ve BPF'te sayaç yok, yani "ilkine izin ver, sonrakini reddet"
+yazılamıyor. `SECCOMP_RET_USER_NOTIF` kararı bir denetçi sürece bırakıyor ve
+denetçi sayabiliyor. `mt_exec_once.c` şunu yapıyor:
+
+```
+socketpair -> fork
+  |- çocuk (hedef): filtreyi NEW_LISTENER ile kurar, execve eder
+  `- ebeveyn (denetçi): ilk execve'ye CONTINUE, kalanlara EPERM
+```
+
+Sıra önemli: seccomp filtreleri fork'ta miras alınıyor, o yüzden denetçi
+filtre kurulmadan **önce** fork ediliyor.
+
+Ölçüldü - aynı komut, aynı sandbox:
+
+| | ikinci `exec` |
+|---|---|
+| `single_exec=False` | çalışıyor, çıktı görünüyor |
+| `single_exec=True` | `Operation not permitted`, rc=126 |
+
+İlk tasarım bildirim fd'sini SCM_RIGHTS ile yolluyordu ve **çalışmadı**:
+fd'yi üretmek için filtre kurulmak zorunda, ama kurulduktan sonra hedef
+artık `sendmsg` çağıramıyor - listede yok ve olmaması gerekiyor. Hedef
+orada SIGSYS ile ölüyordu. Çözüm ters yönde: hedef fd'yi yollamıyor, denetçi
+`pidfd_getfd` ile alıyor. Hedefin filtre kurulduktan sonra ihtiyaç duyduğu
+tek şey bir `write` ve bir `fcntl`.
+
+TOCTOU notu: USER_NOTIF ile syscall argümanlarını okumak klasik bir tuzak.
+Buradaki denetçi hiçbir argümana bakmıyor, yalnızca sayıyor - karar
+argümandan bağımsız olduğu için o sınıf hata yok.
+
+Sınırı: bu bir ayrıcalık sınırı değil, sertleştirme katmanı. Denetçi hedefle
+aynı ad alanında ve aynı kullanıcıda. Değeri, ele geçirilmiş bir ffmpeg'in
+"kabuk çağır" adımını kesmesi.
+
+## Fuzzing ve stres paketi
+
+`test_fuzz.py`. Dört başlık: diferansiyel filtre fuzz'ı, kapsamlı syscall
+taraması, tek-exec kuralı, kaçış/stres.
+
+### Kapsamlı tarama neyi buldu
+
+Tek tek yazılmış testler yalnızca akla gelen syscall'ları kapsıyor.
+`mt_sweep` 0'dan 460'a kadar **her** numarayı deniyor: her numara için bir
+süreç çatallanıyor (filtre geri alınamaz), filtre kuruluyor, çağrı yapılıyor
+ve sonuç bildiriliyor. Ad alanlarının içinde koşuyor, çünkü sıfır argümanlı
+bir syscall çoğu zaman EFAULT ile döner ama hepsi değil.
+
+Bulgu: **bu çekirdekte 335 ve 336 numaralı çağrılar hiçbir seccomp
+filtresine uğramıyor.** Filtresiz koşuda 335 SIGILL, 336 ENXIO veriyor -
+yani ikisi de bu platforma özgü. Filtrenin mantığı doğru: Python'da yazılmış
+küçük bir BPF yorumlayıcısı 336 için `KILL` döndürüyor, yani program doğru,
+çekirdek onu uygulamıyor. Nedenini çözemedim ve uydurmuyorum; test bunu
+gizlemek yerine görünür kılıyor.
+
+Test bu yüzden sabit bir istisna listesi yazmıyor. Temel çizgi, **aynı
+üreticiyle** yapılmış neredeyse boş bir filtre (`write` + `exit_group`):
+önce bu çekirdekte gerçekten durdurulabilen numaralar ölçülüyor, sonra
+gerçek filtrenin onların hepsini durdurduğu doğrulanıyor. Böylece
+karşılaştırma "izin listem fazla geniş mi" sorusunu "bu çekirdekte ne
+oluyor" sorusundan ayırıyor ve test başka makinelerde de doğru kalıyor.
+
+Geri kalan 458 numara tam olarak beklendiği gibi: izin listesindekiler
+geçiyor, `fork`/`vfork` EPERM, `clone3` ENOSYS, diğer her şey SIGSYS.
+
+### Diğer başlıklar
+
+* **Filtre fuzz'ı** - rastgele izin listeleriyle 300 program üretiliyor;
+  hepsi RET ile bitmeli, her izinli syscall kodlanmış olmalı, üretim
+  deterministik ve sıralamadan bağımsız olmalı, C ile birebir aynı çıkmalı.
+* **Kaçış denemeleri** - çıktı dizinine konan sembolik bağla ana makineye
+  yazmak, dosya boyutu sınırını aşmak, fd tüketmek, argv üzerinden ikinci
+  program kaçırmak.
+* **Stres** - 12 eşzamanlı sandbox koşusu, ardından mount/süreç sızıntısı
+  denetimi.
+* **Medya fuzz'ı** (ffmpeg gerekiyor) - geçerli bir mp4'ün baytları rastgele
+  bozularak 12 tur besleniyor. Amaç ffmpeg'de hata bulmak değil; girdi ne
+  olursa olsun sandbox'ın ayakta kalması, işin sınırlar içinde bitmesi ve
+  geride kalıntı olmaması.
 
 ## Seccomp: izin listesi nasıl belirlendi
 
@@ -111,7 +220,9 @@ filtresi onun arkasındaki dizeyi güvenle okuyamıyor (TOCTOU). Yani "`openat`
 serbest ama yalnızca `/in` altında" seccomp'la yazılamıyor. Bu depoda o işi
 mount ad alanı yapıyor: başka bir şey zaten görünmüyor.
 
-Somut ve kapanmayan boşluk `execve`. Filtre exec'ten **önce** kuruluyor,
+Somut boşluk `execve`. (Artık `single_exec=True` ile kapatılabiliyor -
+yukarıdaki "C tarafı" bölümüne bakın. Aşağıdaki açıklama o kip kapalıyken
+geçerli.) Filtre exec'ten **önce** kuruluyor,
 dolayısıyla `execve` izin listesinde kalmak zorunda — yoksa ffmpeg hiç
 başlayamaz. Seccomp "ilk exec'e izin ver, sonrakileri reddet" diye bir şey
 ifade edemiyor (sayaç yok). AppArmor `deny /** x` ile tam olarak bunu

@@ -36,6 +36,7 @@ _OFF_ARG0_LO = 16  # args[0]'ın düşük 32 biti (little endian)
 RET_KILL_PROCESS = 0x80000000
 RET_TRAP = 0x00030000
 RET_ERRNO = 0x00050000
+RET_USER_NOTIF = 0x7FC00000
 RET_LOG = 0x7FFC0000
 RET_ALLOW = 0x7FFF0000
 
@@ -63,7 +64,7 @@ SYSCALLS_X86_64 = {
     "execve": 59, "exit": 60, "uname": 63, "fcntl": 72, "fsync": 74,
     "ftruncate": 77, "getcwd": 79, "rename": 82, "mkdir": 83, "unlink": 87,
     "readlink": 89, "sysinfo": 99, "getuid": 102, "getgid": 104, "geteuid": 107,
-    "getegid": 108, "getppid": 110, "getpgrp": 111, "sigaltstack": 131,
+    "execveat": 322, "getegid": 108, "getppid": 110, "getpgrp": 111, "sigaltstack": 131,
     "arch_prctl": 158, "gettid": 186,
     "time": 201, "futex": 202, "sched_getaffinity": 204, "getdents64": 217,
     "set_tid_address": 218, "restart_syscall": 219, "fadvise64": 221,
@@ -202,6 +203,7 @@ def build_filter(
     syscalls=None,
     denied_action=RET_KILL_PROCESS,
     thread_only_clone=True,
+    execve_action=None,
 ):
     """İzin listesinden BPF programı üretir.
 
@@ -215,10 +217,14 @@ def build_filter(
     ``clone``'a düşüyor ve bayrak denetimi yeniden mümkün oluyor. Ölçüldü:
     ENOSYS olmadan Python'ın iş parçacığı açması SIGSYS ile ölüyor.
 
-    ``execve`` izin listesinde kalmak zorunda - filtreyi exec'ten önce
-    kuruyoruz, dolayısıyla ffmpeg'in kendisi de bu syscall'dan geçiyor.
-    Bu boşluğu seccomp kapatamaz; AppArmor profili ``deny /** x`` ile
-    kapatıyor (bkz. sandbox/apparmor/).
+    ``execve`` normalde izin listesinde kalmak zorunda - filtreyi exec'ten
+    önce kuruyoruz, dolayısıyla hedefin kendisi de bu syscall'dan geçiyor.
+    Seccomp tek başına "ilkine izin ver, sonrakini reddet" diyemiyor (sayaç
+    yok). ``execve_action`` o boşluğu kapatmanın yolu: ``RET_USER_NOTIF``
+    verildiğinde karar bir denetçi sürece bırakılıyor ve denetçi ilk exec'i
+    geçirip kalanları reddediyor (bkz. sandbox/native/).
+
+    ``execveat`` da aynı eylemi alıyor; yoksa doğrudan bir atlatma olurdu.
     """
     table = syscalls if syscalls is not None else SYSCALLS_X86_64
     unknown = [name for name in allowed_names if name not in table]
@@ -237,6 +243,10 @@ def build_filter(
         table[name] for name in ("fork", "vfork") if name in table
     ] if thread_only_clone else []
     special = {clone_nr, clone3_nr, *fork_numbers} if thread_only_clone else set()
+    exec_numbers = []
+    if execve_action is not None:
+        exec_numbers = [table[n] for n in ("execve", "execveat") if n in table]
+        special = special | set(exec_numbers)
     numbers = sorted({table[name] for name in allowed_names} - special)
 
     asm = _Assembler()
@@ -257,6 +267,8 @@ def build_filter(
         asm.jeq(clone3_nr, jt="clone3_enosys", jf=0)
     for number in fork_numbers:
         asm.jeq(number, jt="deny_clone", jf=0)
+    for number in exec_numbers:
+        asm.jeq(number, jt="exec_action", jf=0)
 
     for number in numbers:
         asm.jeq(number, jt="allow", jf=0)
@@ -272,6 +284,9 @@ def build_filter(
     if thread_only_clone and clone3_nr is not None:
         asm.label("clone3_enosys")
         asm.ret(RET_ERRNO | ENOSYS)
+    if exec_numbers:
+        asm.label("exec_action")
+        asm.ret(execve_action)
 
     asm.label("allow")
     asm.ret(RET_ALLOW)

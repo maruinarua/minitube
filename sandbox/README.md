@@ -152,14 +152,18 @@ süreç çatallanıyor (filtre geri alınamaz), filtre kuruluyor, çağrı yapı
 ve sonuç bildiriliyor. Ad alanlarının içinde koşuyor, çünkü sıfır argümanlı
 bir syscall çoğu zaman EFAULT ile döner ama hepsi değil.
 
-Bulgu: **bu çekirdekte 335 ve 336 numaralı çağrılar hiçbir seccomp
-filtresine uğramıyor.** Filtresiz koşuda 335 SIGILL, 336 ENXIO veriyor -
+Bulgu: **bazı syscall numaraları hiçbir seccomp filtresine uğramıyor** ve
+hangileri olduğu makineye göre değişiyor. Bu deponun geliştirildiği
+çekirdekte 335 ve 336; GitHub koşucusunda yalnızca 335. İki ayrı makinede
+ölçüldü ve sabit bir istisna listesinin neden yanlış olacağını da bu
+gösteriyor - iki makineden birinde mutlaka hatalı olurdu. Filtresiz koşuda 335 SIGILL, 336 ENXIO veriyor -
 yani ikisi de bu platforma özgü. Filtrenin mantığı doğru: Python'da yazılmış
 küçük bir BPF yorumlayıcısı 336 için `KILL` döndürüyor, yani program doğru,
 çekirdek onu uygulamıyor. Nedenini çözemedim ve uydurmuyorum; test bunu
 gizlemek yerine görünür kılıyor.
 
-Test bu yüzden sabit bir istisna listesi yazmıyor. Temel çizgi, **aynı
+Test bu yüzden sabit bir istisna listesi yazmıyor - yazsaydı iki
+makineden birinde yanlış olurdu. Temel çizgi, **aynı
 üreticiyle** yapılmış neredeyse boş bir filtre (`write` + `exit_group`):
 önce bu çekirdekte gerçekten durdurulabilen numaralar ölçülüyor, sonra
 gerçek filtrenin onların hepsini durdurduğu doğrulanıyor. Böylece

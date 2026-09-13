@@ -1,0 +1,81 @@
+# MiniTube - ffmpeg için AppArmor profili
+#
+# Kurulum:
+#   sudo cp sandbox/apparmor/minitube-ffmpeg /etc/apparmor.d/minitube-ffmpeg
+#   sudo apparmor_parser -r -W /etc/apparmor.d/minitube-ffmpeg
+#   aa-status | grep minitube-ffmpeg
+#
+# Kullanım: Policy(apparmor_profile="minitube-ffmpeg"). Sarmalayıcı exec
+# anında bu profile geçiyor; geçemezse iş başarısız oluyor.
+#
+# NEDEN SECCOMP'UN YANINDA BUNA DA İHTİYAÇ VAR
+#
+# İkisi farklı şeyleri ifade edebiliyor:
+#
+#   * seccomp syscall *numarasına* ve tamsayı argümanlarına bakıyor. Yola
+#     bakamıyor - işaretçinin arkasındaki dizeyi okumak güvenli değil
+#     (TOCTOU). Yani "openat serbest ama yalnızca /in altında" seccomp'la
+#     yazılamıyor.
+#   * AppArmor tam olarak yol yazabiliyor ama syscall sınıflarını
+#     seccomp kadar ince kesemiyor.
+#
+# Somut boşluk: sarmalayıcı seccomp filtresini exec'ten ÖNCE kuruyor,
+# dolayısıyla execve izin listesinde kalmak zorunda - yoksa ffmpeg hiç
+# başlayamaz. Aşağıdaki "deny /** x" o boşluğu kapatıyor: ffmpeg içinde kod
+# çalıştıran biri artık başka bir ikiliye exec edemiyor.
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+profile minitube-ffmpeg {
+
+  # --- Çalıştırma: hiçbir şey ---------------------------------------------
+  # Seccomp'un kapatamadığı execve boşluğu burada kapanıyor. Profilin kendi
+  # ikilisi için "m" (mmap executable) veriliyor, "x" verilmiyor: süreç zaten
+  # çalışıyor, yeniden exec etmesi gerekmiyor.
+  deny /** x,
+
+  # --- Ağ: hiçbir şey ------------------------------------------------------
+  # Ağ ad alanı zaten boş; bu ikinci kilit, ad alanı katmanı devre dışı
+  # kaldığında (ör. userns kapalı bir çekirdek) tek başına çalışsın diye.
+  deny network,
+  deny unix,
+
+  # --- Yetenekler ----------------------------------------------------------
+  # Hiç "capability" kuralı yok, yani hepsi reddedilmiş durumda.
+  # Kullanıcı ad alanı içinde "root" görünmek buna çare değil.
+
+  # --- Süreçler arası ------------------------------------------------------
+  deny ptrace,
+  deny signal (send) peer=/**,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+
+  # --- Dosya sistemi -------------------------------------------------------
+  # Sandbox içindeki düzen: /ffmpeg (ikili), /in (girdi), /out (çıktı), /tmp.
+  /ffmpeg          mr,
+  /in/**           r,
+  /out/**          rw,
+  /out/            rw,
+  /tmp/**          rwk,
+  /tmp/            rw,
+
+  # Sarmalayıcı olmadan, ana makine yollarıyla doğrudan çalıştırılırsa
+  # profilin yine bir anlamı olsun diye:
+  /usr/bin/ffmpeg  mr,
+  /usr/lib/@{multiarch}/**  mr,
+  /lib/@{multiarch}/**      mr,
+
+  # ffmpeg'in yokluğuna katlandığı, ama görünürse bilgi sızdıran yollar.
+  # Açıkça reddediliyor ki denetim kaydı gürültü üretmesin.
+  deny /proc/** rw,
+  deny /sys/** rw,
+  deny /etc/** rw,
+  deny @{HOME}/** rw,
+  deny /root/** rw,
+
+  # Salt okunur köke rağmen yazma denemesi olursa kaydedilsin.
+  audit deny /*  w,
+}

@@ -19,9 +19,15 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 ```
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
+test_sandbox.py  Sandbox tests. The engine ones need no ffmpeg.
+sandbox/         Isolation subsystem. NOT wired into app.py yet.
+                 minisandbox.py is a general namespace sandbox (stdlib only);
+                 ffmpeg_sandbox.py is the ffmpeg-specific policy on top.
+                 See sandbox/README.md for the threat model and layers.
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
 requirements-lock.txt  All 7 resolved versions with sha256 hashes.
+requirements-pip.txt   pip itself, pinned and hashed. CI installs it first.
 videos.json      The live datastore (a JSON array). Gitignored, not tracked.
 uploads/         Uploaded video files, served at /uploads/<filename>.
                  Gitignored except .gitkeep, which keeps the directory.
@@ -190,8 +196,9 @@ pip install -r requirements.txt
 python app.py          # http://127.0.0.1:5000, debug off
 ```
 
-Two files, different jobs. `requirements.txt` declares what the app imports —
-Flask, plus Werkzeug because `app.py` imports `secure_filename` and `ProxyFix`
+Three requirements files, three jobs. `requirements.txt` declares what the app
+imports — Flask, plus Werkzeug because `app.py` imports `secure_filename` and
+`ProxyFix`
 from it directly and tests assert their behaviour, while Flask itself only
 requires `werkzeug>=3.1.0`. It uses `~=`, so patch releases including security
 fixes still arrive while minor and major ones are blocked.
@@ -227,6 +234,19 @@ strips the hashes out of the lock, feeds the bare pins to
 `pip install --dry-run -r requirements.txt -c ...`, and fails when the two files
 disagree. Keep that step. Without it, bumping `requirements.txt` and forgetting
 the lock leaves CI green while testing the old version.
+
+`requirements-pip.txt` pins pip itself, hash-checked, and CI installs it before
+anything else. pip is what performs every other verification, and its version
+otherwise comes from whatever the interpreter ships with — four local 3.10-3.13
+installs gave three different pips (23.0.1, 24.0, 25.3), and the runner image is
+no more pinned than that. Only the wheel hash is listed —
+pip is pure Python, so one `py3-none-any` wheel covers every entry, and omitting
+the sdist hash keeps the source-build fallback closed. This shortens the chain to
+the runner's own pip rather than eliminating it: the pip doing the verifying is
+still the unpinned one. Closing that last link means distrusting the runner
+image, which is a different job. A pinned pip does not receive security fixes on
+its own, so bump it deliberately — the version and the digest URL are in the
+file's header.
 
 Runtime knobs, all via environment variables:
 
@@ -287,8 +307,28 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 128 tests
+python -m unittest -v          # 175 tests (128 app + 47 sandbox)
 ```
+
+Sandbox tests skip in layers, and **the skip count is the thing to read** — a
+green suite that skipped everything is not evidence. Locally, 9 skip without
+ffmpeg. On a GitHub runner it was 25: Ubuntu 24.04 restricts unprivileged user
+namespaces through AppArmor, so every namespace-based test skipped too and CI's
+green said nothing about the sandbox. The workflow now clears that sysctl
+before the suite; if a runner refuses, the tests skip rather than fail, so
+check the count instead of trusting the colour. Point `FFMPEG_PATH` at a binary
+to run the ffmpeg-specific ones.
+
+`python -m sandbox.minisandbox --demo` shows the isolation with nothing
+installed. Three real bugs came out of running it — see sandbox/README.md.
+
+The AppArmor layer cannot be verified here (no AppArmor in this container), so
+its verification lives in CI, where the runner has it: the workflow parses the
+real profile and loads `sandbox/apparmor/selftest`, and `AppArmorProfileTests`
+proves enforcement by difference — the same command under a permissive profile
+must succeed and under an empty one must fail. If those two agree, AppArmor is
+not being applied and the test fails. Don't delete the selftest profiles;
+loading a profile is not evidence that it is enforced.
 
 GitHub Actions runs exactly that on every push and pull request against `main`,
 across Python 3.10 through 3.13 (`.github/workflows/tests.yml`). All four are
@@ -366,7 +406,13 @@ Still open. Fix when the task calls for it — flag, don't silently patch, when
 it doesn't:
 
 - **Content is not verified to be video** beyond the extension check — no
-  container/codec sniffing.
+  container/codec sniffing. `sandbox/` exists for the day this changes: it
+  runs ffmpeg under namespaces + seccomp so that a malicious file gets a
+  parser with no network, no host filesystem and a read-only root. It is
+  written and tested but **not called from `app.py`**; wiring it in needs a
+  job queue, because transcoding inside the upload request would block the
+  single-threaded dev server. Don't wire it in as a side effect of another
+  change — `sandbox/README.md` lists what the decision involves.
 - **No total disk quota.** Rate limiting slows disk fill but does not cap it —
   a patient client can still keep uploading within its budget.
 - **IP-based identity** is still only an approximation of a person. Behind a

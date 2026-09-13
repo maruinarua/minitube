@@ -1,0 +1,64 @@
+# MiniTube - AppArmor öz sınama profilleri
+#
+# Bunlar üretimde kullanılmıyor. Tek işleri, sandbox'ın AppArmor katmanının
+# gerçekten *uygulandığını* kanıtlamak.
+#
+# Neden gerekli: "profil yüklendi" ile "profil iş görüyor" aynı şey değil.
+# Geçiş isteğinin kabul edilmesi de kanıt değil - AppArmor'suz bir çekirdekte
+# /proc/self/attr/exec'e yazmak sessizce başarılı oluyor (bu depoda ölçüldü).
+# Tek sağlam kanıt fark: aynı komut, iki farklı profil, iki farklı sonuç.
+#
+# Aşağıdaki iki profil o farkı üretiyor:
+#
+#   allow  -> kabuk çalışır, "merhaba" yazar
+#   deny   -> hiçbir kural yok, yani her şey reddedilir; kabuk libc'sini bile
+#             eşleyemez ve exec başarısız olur
+#
+# İkisi de yüklüyken test ikisini de koşuyor. Sonuçlar aynı çıkarsa AppArmor
+# uygulanmıyor demektir ve test kırılır.
+#
+# Kurulum (CI bunu kendisi yapıyor):
+#   sudo apparmor_parser -r -W sandbox/apparmor/selftest
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+# Kabuğun çalışmasına yetecek en az kural. Gerçek profilin şeklini taklit
+# ediyor: ikili ve kütüphaneler "mr" (oku + çalıştırılabilir eşle), hiçbir
+# yerde "x" yok.
+profile minitube-sandbox-selftest-allow {
+
+  deny /** x,
+
+  deny network,
+  deny ptrace,
+  deny mount,
+
+  # Kabuk ve yükleyici. Sandbox içinde yollar korunuyor, o yüzden ana
+  # makinedeki gerçek yollar geçerli.
+  /usr/bin/dash             mr,
+  /bin/dash                 mr,
+  /usr/bin/bash             mr,
+  /bin/bash                 mr,
+  /lib64/ld-linux-x86-64.so.2  mr,
+  /usr/lib64/ld-linux-x86-64.so.2  mr,
+  /lib/@{multiarch}/**      mr,
+  /usr/lib/@{multiarch}/**  mr,
+
+  /dev/null                 rw,
+  /dev/zero                 r,
+  /dev/urandom              r,
+  /dev/full                 rw,
+  /dev/random               r,
+
+  /out/                     rw,
+  /out/**                   rw,
+  /tmp/                     rw,
+  /tmp/**                   rwk,
+}
+
+# Kasıtlı olarak boş: AppArmor'da kural yoksa her şey reddedilir. Bu profille
+# çalıştırılan hiçbir program başlayamamalı.
+profile minitube-sandbox-selftest-deny {
+}

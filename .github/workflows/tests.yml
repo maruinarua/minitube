@@ -26,6 +26,58 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-lock.txt
+            requirements-pip.txt
+
+      - name: pip'i sabitle
+        # Karmaları doğrulayan araç pip'in kendisi ve sürümü koşucu imajından
+        # geliyordu; bağımlılıklar sabitken onları kuran şey değildi. Burada
+        # sabitleniyor ve kendi karmasıyla doğrulanıyor.
+        #
+        # Sınır: bu doğrulamayı henüz sabitlenmemiş olan pip yapıyor. Zincir
+        # koşucudaki pip'e kadar kısalıyor, sıfıra inmiyor.
+        run: |
+          pip install --only-binary=:all: --require-hashes -r requirements-pip.txt
+          pip --version
+
+      - name: Ayrıcalıksız kullanıcı ad alanlarını aç
+        # Ubuntu 24.04 koşucuları ayrıcalıksız user namespace'leri AppArmor
+        # ile kısıtlıyor. Bu olmadan sandbox motor testlerinin tamamı
+        # atlanıyor - ölçüldü: 25 atlama, 15'i motor. O hâlde CI'daki yeşil
+        # sandbox hakkında hiçbir şey söylemiyor.
+        #
+        # "|| true": kısıtlama olmayan ya da sysctl'e izin vermeyen bir
+        # koşucuda adım kırılmasın; testler zaten yetenek yoksa atlıyor.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces)"
+          unshare --user --map-root-user --net true \
+            && echo "kullanıcı ad alanı: CALISIYOR" \
+            || echo "kullanıcı ad alanı: YOK (motor testleri atlanacak)"
+
+      - name: AppArmor profillerini sına ve yükle
+        # Bu depoda geliştirme yapılan makinede AppArmor yok, dolayısıyla
+        # profil orada hiç doğrulanamıyor. Koşucuda etkin - CI kaydından
+        # görüldü - o yüzden asıl doğrulama yeri burası.
+        #
+        # Adım kendi durumunu MINITUBE_APPARMOR_SELFTEST ile bildiriyor.
+        # Testler o işarete bakıyor: yüklenemezse atlıyorlar, sessizce
+        # "geçti" demiyorlar.
+        run: |
+          if [ ! -d /sys/kernel/security/apparmor ]; then
+            echo "AppArmor çekirdekte etkin değil, atlanıyor"
+            exit 0
+          fi
+          if ! command -v apparmor_parser >/dev/null; then
+            echo "apparmor_parser yok, atlanıyor"
+            exit 0
+          fi
+          echo "--- gerçek profilin sözdizimi ---"
+          sudo apparmor_parser -Q --skip-cache sandbox/apparmor/minitube-ffmpeg
+          echo "sözdizimi: OK"
+          echo "--- öz sınama profilleri yükleniyor ---"
+          sudo apparmor_parser -r -W sandbox/apparmor/selftest
+          echo "MINITUBE_APPARMOR_SELFTEST=1" >> "$GITHUB_ENV"
+          echo "yüklendi"
 
       - name: Kilit requirements.txt ile tutarlı mı
         # Kurulum kilitten yapıldığı için, requirements.txt güncellenip kilit

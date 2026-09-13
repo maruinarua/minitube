@@ -72,7 +72,7 @@ jobs:
             exit 0
           fi
           echo "--- gerçek profilin sözdizimi ---"
-          sudo apparmor_parser -Q sandbox/apparmor/minitube-ffmpeg
+          sudo apparmor_parser -Q --skip-cache sandbox/apparmor/minitube-ffmpeg
           echo "sözdizimi: OK"
           echo "--- öz sınama profilleri yükleniyor ---"
           sudo apparmor_parser -r -W sandbox/apparmor/selftest

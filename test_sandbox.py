@@ -468,8 +468,12 @@ class AppArmorProfileTests(unittest.TestCase):
     def test_real_profile_parses(self):
         # Sözdizimi denetimi çekirdeğe yükleme gerektirmiyor, yani AppArmor
         # etkin olmayan bir makinede bile anlamlı.
+        # --skip-cache şart: onsuz apparmor_parser /var/cache/apparmor'a
+        # yazmaya çalışıyor ve root olmayan kullanıcıda "Permission denied"
+        # veriyor. Bu bir sözdizimi hatası değil ama testi kırıyordu; CI'da
+        # ölçüldü.
         done = subprocess.run(
-            [shutil.which("apparmor_parser"), "-Q",
+            [shutil.which("apparmor_parser"), "-Q", "--skip-cache",
              os.path.join(self.PROFILE_DIR, "minitube-ffmpeg")],
             capture_output=True, timeout=60,
         )

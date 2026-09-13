@@ -37,7 +37,8 @@ demek. 2. katman bunu kapatıyor.
 | `minisandbox.py` | İzolasyon motoru. ffmpeg'den bağımsız, herhangi bir komutu çalıştırıyor. Yalnızca stdlib. |
 | `seccomp.py` | BPF filtresi üretip kuruyor. libseccomp yok. |
 | `ffmpeg_sandbox.py` | ffmpeg'e özgü politika: argümanlar, kapsayıcılar, çıktı doğrulaması. |
-| `apparmor/minitube-ffmpeg` | AppArmor profili (bu makinede doğrulanamadı). |
+| `apparmor/minitube-ffmpeg` | AppArmor profili. Sözdizimi ve uygulanışı CI'da sınanıyor. |
+| `apparmor/selftest` | Yalnızca sınama için iki profil: biri izin veren, biri boş. |
 
 Motorun ayrı olmasının pratik bir nedeni var: ffmpeg kurulu olmayan bir
 makinede de sınanabiliyor. Yük olarak sistemin kendi kabuğu kullanılıyor,
@@ -120,9 +121,23 @@ Pratikte bu boşluğun sömürülmesi zaten zor: kökte kabuk yok, kök salt
 okunur, `/out` ve `/tmp` `noexec`, `no_new_privs` açık. Ama "zor" ile
 "ifade edilmiş kural" aynı şey değil.
 
-`sandbox/apparmor/minitube-ffmpeg` profili bu makinede **doğrulanamadı** —
-çekirdekte AppArmor yok. Kuran kişi `apparmor_parser -Q` ile sözdizimini
-sınamalı ve kuralları kendi dağıtımına göre gözden geçirmeli.
+`sandbox/apparmor/minitube-ffmpeg` profili bu deponun geliştirildiği
+makinede doğrulanamıyor - çekirdekte AppArmor yok. Doğrulama CI'ya taşındı;
+koşucuda AppArmor etkin. Orada üç şey sınanıyor:
+
+1. **Sözdizimi.** `apparmor_parser -Q` gerçek profili ayrıştırıyor.
+2. **Uygulanışı.** "Profil yüklendi" ile "profil iş görüyor" aynı şey değil
+   ve geçiş isteğinin kabul edilmesi de kanıt değil - AppArmor'suz bir
+   çekirdekte o yazma sessizce başarılı oluyor. Tek sağlam kanıt fark:
+   `apparmor/selftest` iki profil yüklüyor, biri kabuğun çalışmasına izin
+   veriyor, diğerinde hiç kural yok. Aynı komut ikisiyle çalıştırılıyor;
+   sonuçlar aynı çıkarsa AppArmor uygulanmıyor demektir ve test kırılır.
+3. **Fail-closed.** Yüklü olmayan bir profil istendiğinde iş çalışmıyor.
+
+Profillerin yüklenemediği bir koşucuda testler atlanıyor, sessizce "geçti"
+demiyorlar - CI adımı durumunu `MINITUBE_APPARMOR_SELFTEST` ile bildiriyor.
+Yine de `deny /** x` kuralının gerçek ffmpeg iş yükünde davranışı ayrı bir
+soru; sınanan şey mekanizmanın uygulandığı.
 
 Buna karşılık AppArmor'ın *fail-closed* davranışı doğrulandı ve yolda bir
 hata bulundu: AppArmor olmayan bir çekirdekte `/proc/self/attr/exec` yine

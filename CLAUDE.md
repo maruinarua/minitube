@@ -307,7 +307,7 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 172 tests (128 app + 44 sandbox)
+python -m unittest -v          # 175 tests (128 app + 47 sandbox)
 ```
 
 Sandbox tests skip in layers, and **the skip count is the thing to read** — a

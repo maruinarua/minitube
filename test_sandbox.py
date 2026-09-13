@@ -452,6 +452,82 @@ class EngineTests(unittest.TestCase):
                    ro_binds=[(self.shell, "goreli/yol")])
 
 
+class AppArmorProfileTests(unittest.TestCase):
+    """AppArmor katmanı - bu katman yalnızca AppArmor'lu bir çekirdekte sınanır.
+
+    Depoda geliştirme yapılan makinede AppArmor yok; CI koşucusunda var.
+    O yüzden bu testler orada koşuyor ve `MINITUBE_APPARMOR_SELFTEST`
+    işaretine bakıyorlar: profiller yüklenemediyse atlıyorlar, sessizce
+    "geçti" demiyorlar.
+    """
+
+    PROFILE_DIR = os.path.join(_REPO_ROOT, "sandbox", "apparmor")
+    SELFTEST_READY = os.environ.get("MINITUBE_APPARMOR_SELFTEST") == "1"
+
+    @unittest.skipUnless(shutil.which("apparmor_parser"), "apparmor_parser yok")
+    def test_real_profile_parses(self):
+        # Sözdizimi denetimi çekirdeğe yükleme gerektirmiyor, yani AppArmor
+        # etkin olmayan bir makinede bile anlamlı.
+        done = subprocess.run(
+            [shutil.which("apparmor_parser"), "-Q",
+             os.path.join(self.PROFILE_DIR, "minitube-ffmpeg")],
+            capture_output=True, timeout=60,
+        )
+        self.assertEqual(done.returncode, 0,
+                         done.stderr.decode("utf-8", "replace"))
+
+    @requires_engine
+    @unittest.skipUnless(SELFTEST_READY, "öz sınama profilleri yüklü değil")
+    def test_profile_is_actually_enforced(self):
+        """Aynı komut, iki profil, iki sonuç.
+
+        "Profil yüklendi" ile "profil iş görüyor" aynı şey değil, ve geçiş
+        isteğinin kabul edilmesi de kanıt değil - AppArmor'suz bir çekirdekte
+        o yazma sessizce başarılı oluyor. Tek sağlam kanıt fark: izin veren
+        profille komut çalışmalı, hiçbir kuralı olmayan profille
+        çalışmamalı. İkisi aynı çıkarsa AppArmor uygulanmıyor demektir.
+        """
+        shell = os.path.realpath(shutil.which("sh"))
+        libraries = ms.shared_libraries(shell)
+        syscalls = list(seccomp.FFMPEG_SYSCALLS) + ["getppid", "getpgrp"]
+
+        def run_under(profile):
+            return ms.run(
+                [shell, "-c", "echo merhaba"],
+                ro_binds=[shell] + libraries,
+                syscalls=syscalls,
+                apparmor_profile=profile,
+                timeout=60,
+            )
+
+        allowed = run_under("minitube-sandbox-selftest-allow")
+        self.assertEqual(allowed.returncode, 0,
+                         allowed.stderr.decode("utf-8", "replace"))
+        self.assertIn(b"merhaba", allowed.stdout)
+
+        denied = run_under("minitube-sandbox-selftest-deny")
+        self.assertNotEqual(denied.returncode, 0,
+                            "boş profille komut çalıştı: AppArmor uygulanmıyor")
+        self.assertNotIn(b"merhaba", denied.stdout)
+
+    @requires_engine
+    @unittest.skipUnless(ms.apparmor_enabled(), "AppArmor etkin değil")
+    def test_unknown_profile_fails_closed(self):
+        # Yüklü olmayan bir profil istendiğinde iş çalışmamalı. Geçiş isteği
+        # yazılabiliyor ama exec reddediliyor; sessizce profilsiz çalışmak
+        # en kötü sonuç olurdu.
+        shell = os.path.realpath(shutil.which("sh"))
+        done = ms.run(
+            [shell, "-c", "echo merhaba"],
+            ro_binds=[shell] + ms.shared_libraries(shell),
+            syscalls=list(seccomp.FFMPEG_SYSCALLS) + ["getppid", "getpgrp"],
+            apparmor_profile="minitube-boyle-bir-profil-yok",
+            timeout=60,
+        )
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn(b"merhaba", done.stdout)
+
+
 @requires_sandbox
 class SandboxEndToEndTests(unittest.TestCase):
     """Gerçek ffmpeg, gerçek ad alanları."""

@@ -64,7 +64,7 @@ python -m sandbox.minisandbox --with-libs /bin/sh -c 'echo merhaba'
 | 5 | Seccomp izin listesi | Ağ, süreç çatallama, ptrace, mount, bpf | `SeccompEnforcementTests` |
 | 6 | Kaynak sınırları | Bellek bombası, sonsuz kodlama, disk doldurma | `test_timeout_kills_the_command`, `test_timeout_leaves_no_surviving_process` |
 | 6b | Minimal `/dev` | - (işlevsellik) | `test_dev_null_is_a_working_character_device` |
-| 7 | AppArmor (opsiyonel) | `execve` — seccomp'un kapatamadığı boşluk | **doğrulanmadı**, aşağıya bakın |
+| 7 | AppArmor (opsiyonel) | `execve` — seccomp'un kapatamadığı boşluk | `AppArmorProfileTests` (CI'da; bu makinede AppArmor yok) |
 | 8 | Çıktı doğrulaması | Beklenmeyen/çok büyük çıktı, yarım dosya | `_validate_output` |
 
 Katmanlar birbirinin üstünü örtüyor ve bu, test yazarken bir tuzak: bir

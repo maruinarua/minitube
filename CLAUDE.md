@@ -322,6 +322,14 @@ to run the ffmpeg-specific ones.
 `python -m sandbox.minisandbox --demo` shows the isolation with nothing
 installed. Three real bugs came out of running it — see sandbox/README.md.
 
+The AppArmor layer cannot be verified here (no AppArmor in this container), so
+its verification lives in CI, where the runner has it: the workflow parses the
+real profile and loads `sandbox/apparmor/selftest`, and `AppArmorProfileTests`
+proves enforcement by difference — the same command under a permissive profile
+must succeed and under an empty one must fail. If those two agree, AppArmor is
+not being applied and the test fails. Don't delete the selftest profiles;
+loading a profile is not evidence that it is enforced.
+
 GitHub Actions runs exactly that on every push and pull request against `main`,
 across Python 3.10 through 3.13 (`.github/workflows/tests.yml`). All four are
 verified locally, so a red matrix entry means a real incompatibility rather than

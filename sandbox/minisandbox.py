@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 
+from . import native
 from . import seccomp
 
 # --- mount(2) bayrakları ---------------------------------------------------
@@ -53,6 +54,10 @@ MS_REC = 16384
 MS_PRIVATE = 1 << 18
 MNT_DETACH = 2
 _SYS_PIVOT_ROOT = 155  # x86_64
+
+# Tek-exec kipinde sandbox içindeki sabit yollar.
+_HELPER_PATH = "/mt-exec-once"
+_POLICY_PATH = "/policy.bpf"
 
 # Minimal /dev. Bunlar olmadan "2>/dev/null" gibi çok yaygın bir deyim
 # çalışmıyor - demo bunu yakaladı: kabuk yönlendirmeyi kuramayınca komut
@@ -270,6 +275,7 @@ def run(
     dev_nodes=DEFAULT_DEV_NODES,
     timeout=180,
     apparmor_profile=None,
+    single_exec=False,
     env=None,
     workdir="/",
     check_capabilities=True,
@@ -286,21 +292,50 @@ def run(
     limits = limits or Limits()
     if check_capabilities:
         problems = missing_capabilities(apparmor_profile)
+        if single_exec and not native.available():
+            # Fail-closed: tek-exec kipi istenip de kurulamıyorsa komutu
+            # zayıf bir filtreyle çalıştırmak sessizce daha az koruma olurdu.
+            problems.append(
+                "tek-exec kipi istendi ama C tarafı derlenemedi "
+                "(derleyici gerekiyor)"
+            )
         if problems:
             raise SandboxError(
                 "izolasyon kurulamıyor, komut çalıştırılmadı: "
                 + "; ".join(problems)
             )
 
+    extra_ro = []
+    policy_handle = None
+    if single_exec:
+        # Yardımcı ve politika dosyası sandbox içine bağlanıyor. BPF'i burada
+        # üretip dosyaya yazıyoruz: yardımcı onu olduğu gibi kuruyor, yani
+        # filtrenin tek doğruluk kaynağı yine Python tarafı.
+        program = seccomp.build_filter(
+            list(syscalls) if syscalls else list(seccomp.FFMPEG_SYSCALLS),
+            execve_action=seccomp.RET_USER_NOTIF,
+        )
+        policy_handle = tempfile.NamedTemporaryFile(
+            prefix="mt-policy-", suffix=".bpf", delete=False
+        )
+        policy_handle.write(program)
+        policy_handle.flush()
+        policy_handle.close()
+        extra_ro = [
+            (native.exec_once_helper(), _HELPER_PATH),
+            (policy_handle.name, _POLICY_PATH),
+        ]
+
     spec = {
         "argv": list(argv),
-        "ro_binds": _normalise_binds(ro_binds),
+        "ro_binds": _normalise_binds(list(ro_binds) + extra_ro),
         "rw_binds": _normalise_binds(rw_binds),
         "limits": limits.as_dict(),
         "tmpfs_bytes": tmpfs_bytes,
         "dev_nodes": [p for p in (dev_nodes or ()) if os.path.exists(p)],
         "apparmor_profile": apparmor_profile,
         "syscalls": list(syscalls) if syscalls else list(seccomp.FFMPEG_SYSCALLS),
+        "single_exec": bool(single_exec),
         "env": dict(env) if env else {"LC_ALL": "C"},
         "workdir": workdir,
     }
@@ -359,6 +394,12 @@ def run(
         raise SandboxTimeout(
             f"komut {timeout} saniyede bitmedi, öldürüldü"
         ) from None
+    finally:
+        if policy_handle is not None:
+            try:
+                os.unlink(policy_handle.name)
+            except OSError:
+                pass
     return subprocess.CompletedProcess(
         command, process.returncode, stdout, stderr
     )
@@ -524,6 +565,12 @@ def _stage2(spec):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     os.umask(0o077)
+    if spec.get("single_exec"):
+        # Filtreyi yardımcı kuruyor: NEW_LISTENER ile kurup denetçiyi
+        # fork etmesi gerekiyor ve fork, filtre kurulduktan sonra yasak.
+        # Sıra bu yüzden yardımcının içinde.
+        argv = [_HELPER_PATH, _POLICY_PATH] + list(spec["argv"])
+        os.execve(_HELPER_PATH, argv, spec["env"])
     seccomp.apply_ffmpeg_policy(spec["syscalls"])
     os.execve(spec["argv"][0], spec["argv"], spec["env"])
 

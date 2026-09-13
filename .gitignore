@@ -16,3 +16,6 @@ __pycache__/
 .venv/
 .venv-test/
 venv/
+
+# C tarafının derleme çıktıları
+sandbox/native/build/

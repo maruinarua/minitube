@@ -20,9 +20,13 @@ Keep new user-facing strings in Turkish to match; code identifiers stay English.
 app.py           All routes, all persistence helpers. The entire backend.
 test_app.py      Security/privacy test suite (stdlib unittest, no deps).
 test_sandbox.py  Sandbox tests. The engine ones need no ffmpeg.
+test_fuzz.py     Fuzzing + stress: differential filter fuzz, exhaustive
+                 syscall sweep, single-exec, escape and leak checks.
 sandbox/         Isolation subsystem. NOT wired into app.py yet.
                  minisandbox.py is a general namespace sandbox (stdlib only);
-                 ffmpeg_sandbox.py is the ffmpeg-specific policy on top.
+                 ffmpeg_sandbox.py is the ffmpeg-specific policy on top;
+                 native/ is an OPTIONAL C layer (build it with
+                 `python -m sandbox.native`, never required at runtime).
                  See sandbox/README.md for the threat model and layers.
 .github/         Actions workflow: runs the suite on 3.10-3.13.
 requirements.txt Flask and Werkzeug — what the app imports directly.
@@ -321,6 +325,23 @@ to run the ffmpeg-specific ones.
 
 `python -m sandbox.minisandbox --demo` shows the isolation with nothing
 installed. Three real bugs came out of running it — see sandbox/README.md.
+
+The C layer under `sandbox/native/` is optional and must stay that way: it is
+built on demand and everything falls back to Python when no compiler exists.
+It earns its keep twice. It re-implements the BPF builder so the two can be
+compared byte-for-byte — a silently widened allowlist in Python fails
+`test_c_and_python_filters_are_identical`, which no single-implementation test
+would catch. And `mt_exec_once.c` closes the `execve` gap with
+`SECCOMP_RET_USER_NOTIF`: a supervisor counts execs, allows the first and
+refuses the rest (`single_exec=True`). Requesting that mode without a compiler
+fails closed rather than quietly running with a weaker filter.
+
+`test_fuzz.py` sweeps every syscall number from 0 to 460 rather than the ones
+someone thought of. It calibrates against a nearly-empty filter built by the
+same builder instead of hard-coding exceptions, because two numbers on this
+kernel (335, 336) bypass seccomp entirely — measured, unexplained, and
+reported rather than hidden. Keep that calibration; a fixed exception list
+would rot silently on another kernel.
 
 The AppArmor layer cannot be verified here (no AppArmor in this container), so
 its verification lives in CI, where the runner has it: the workflow parses the

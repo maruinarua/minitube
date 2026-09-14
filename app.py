@@ -28,6 +28,11 @@ ALLOWED_EXTENSIONS = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".m4v"}
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "256"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
+# uploads/ için toplam tavan. Tek dosya sınırı diskin dolmasını engellemiyor:
+# hız sınırı içinde kalan sabırlı bir istemci yükleyip yükleyip diski
+# doldurabiliyordu. 0 kotayı kapatır.
+MAX_TOTAL_UPLOAD_MB = int(os.environ.get("MAX_TOTAL_UPLOAD_MB", "4096"))
+
 MAX_COMMENT_LENGTH = 1000
 MAX_TITLE_LENGTH = 200
 
@@ -386,6 +391,56 @@ def build_safe_filename(original_name):
 
     return f"{base}{suffix}"
 
+def uploads_total_bytes():
+    """uploads/ içindeki dosyaların toplam boyutu.
+
+    Doğruluk kaynağı dizin, `videos.json` değil: kayıtsız kalmış bir dosya da
+    yer kaplıyor ve kotanın amacı tam olarak diskteki yer.
+    """
+    total = 0
+    with os.scandir(UPLOAD_FOLDER) as entries:
+        for entry in entries:
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                # Tarama sırasında silinmiş olabilir; yok sayılan dosya zaten
+                # yer kaplamıyor.
+                continue
+    return total
+
+
+def incoming_size(file):
+    """Yüklenen akışın boyutu, ölçülebiliyorsa.
+
+    Werkzeug gelen gövdeyi geri sarılabilir bir akışa koyuyor, dolayısıyla
+    boyut diske yazmadan öğrenilebiliyor. Ölçülemezse None dönüyor ve
+    denetim yazma sonrasına kalıyor - bu yüzden kotanın iki denetimi var.
+    """
+    stream = getattr(file, "stream", None)
+    if stream is None:
+        return None
+    try:
+        here = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(here)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return size if isinstance(size, int) and size >= 0 else None
+
+
+def quota_bytes():
+    return MAX_TOTAL_UPLOAD_MB * 1024 * 1024
+
+
+def quota_message():
+    return (
+        f"Depolama alanı dolu (toplam en fazla {MAX_TOTAL_UPLOAD_MB} MB). "
+        "Yer açılana kadar yeni video yüklenemiyor."
+    )
+
+
 @app.context_processor
 def inject_limits():
     return {
@@ -424,11 +479,27 @@ def upload():
 
     saved_path = os.path.join(UPLOAD_FOLDER, filename)
 
+    # Kota denetimi, mümkünse yazmadan önce: reddedilecek bir dosyayı diske
+    # yazmanın anlamı yok ve asıl kaçınılmak istenen şey tam olarak o yazma.
+    limit = quota_bytes()
+    expected = incoming_size(file)
+    if limit and expected is not None and uploads_total_bytes() + expected > limit:
+        flash(quota_message())
+        return redirect("/")
+
     # Dosya diske yazıldıktan sonra kayıt yazımı patlarsa (disk dolu, bozuk
     # videos.json) dosya erişilemez halde diskte kalırdı. Kayıt tamamlanamazsa
     # dosyayı da geri alıyoruz; başarılı akış aynen eskisi gibi.
     try:
         file.save(saved_path)
+
+        # İkinci denetim diskteki gerçek boyutla. Akış ölçülemediğinde tek
+        # denetim bu; ölçüldüğünde de eşzamanlı bir yüklemenin araya girmesi
+        # mümkün, çünkü burada kilit yok (videos.json'un kendisinde de yok).
+        if limit and uploads_total_bytes() > limit:
+            os.remove(saved_path)
+            flash(quota_message())
+            return redirect("/")
 
         videos = load_videos()
         videos.append({

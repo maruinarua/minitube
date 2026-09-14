@@ -16,6 +16,8 @@ import textwrap
 import tempfile
 import unittest
 
+import werkzeug.datastructures
+
 
 @contextlib.contextmanager
 def quiet_app_errors(app):
@@ -48,6 +50,7 @@ class MiniTubeTest(unittest.TestCase):
         os.environ["SECRET_KEY"] = TEST_KEY
         os.environ.pop("FLASK_DEBUG", None)
         os.environ.pop("MAX_UPLOAD_MB", None)
+        os.environ.pop("MAX_TOTAL_UPLOAD_MB", None)
         os.environ.pop("ADMIN_KEY", None)
         os.environ.pop("TRUSTED_PROXY_COUNT", None)
         os.environ.update(self.env)
@@ -201,6 +204,98 @@ class UploadSizeTests(MiniTubeTest):
     def test_upload_under_limit_succeeds(self):
         self.upload("small.mp4", data=b"x" * 1000)
         self.assertEqual(len(self.stored()), 1)
+
+
+class TotalQuotaTests(MiniTubeTest):
+    """uploads/ toplamı için tavan.
+
+    Tek dosya sınırı diskin dolmasını engellemiyordu: hız sınırı içinde kalan
+    sabırlı bir istemci yükleyip yükleyip diski doldurabiliyordu.
+    """
+
+    # 1 MB toplam, tek dosya sınırı ise bilerek daha yüksek - böylece
+    # reddedilen yükleme MAX_CONTENT_LENGTH'e değil kotaya takılıyor.
+    env = {"MAX_TOTAL_UPLOAD_MB": "1", "MAX_UPLOAD_MB": "8"}
+
+    def test_upload_within_quota_succeeds(self):
+        self.upload("a.mp4", data=b"x" * (600 * 1024))
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_upload_that_would_exceed_quota_is_rejected(self):
+        self.upload("a.mp4", data=b"x" * (600 * 1024))
+        response = self.upload("b.mp4", data=b"x" * (600 * 1024))
+        # 413 değil: istek kendi başına sınırın altında, reddedilme sebebi
+        # toplam. Kullanıcı da bunu okuyabilmeli.
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Depolama alanı dolu", response.get_data(as_text=True))
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_rejected_upload_leaves_nothing_on_disk(self):
+        self.upload("a.mp4", data=b"x" * (600 * 1024))
+        before = self.uploads_dir()
+        self.upload("b.mp4", data=b"x" * (600 * 1024))
+        self.assertEqual(self.uploads_dir(), before)
+
+    def test_deleting_frees_the_quota_again(self):
+        # Kota diskteki gerçek duruma bakıyor, bir sayaca değil: yer açılınca
+        # yükleme yeniden çalışmalı.
+        name = self.upload_video("a.mp4", data=b"x" * (900 * 1024))
+        self.upload("b.mp4", data=b"x" * (900 * 1024))
+        self.assertEqual(len(self.stored()), 1)
+
+        os.remove(os.path.join(self.tmp, "uploads", name))
+        self.upload("c.mp4", data=b"x" * (900 * 1024))
+        self.assertEqual(len(self.stored()), 2)
+
+    def test_quota_is_checked_before_writing(self):
+        # Ön denetimin varlık sebebi, reddedilecek dosyayı hiç yazmamak.
+        # Ölçüldü: bu test olmadan ön denetimi kaldırmak hiçbir testi
+        # kırmıyordu, çünkü yazma sonrası denetim sonucu yine düzeltiyor.
+        self.upload("a.mp4", data=b"x" * (900 * 1024))
+
+        original = werkzeug.datastructures.FileStorage.save
+
+        def explode(*args, **kwargs):
+            raise AssertionError("kota aşılmasına rağmen diske yazıldı")
+
+        werkzeug.datastructures.FileStorage.save = explode
+        self.addCleanup(
+            setattr, werkzeug.datastructures.FileStorage, "save", original
+        )
+
+        response = self.upload("b.mp4", data=b"x" * (900 * 1024))
+        self.assertIn("Depolama alanı dolu", response.get_data(as_text=True))
+
+    def test_quota_still_holds_when_stream_size_is_unknown(self):
+        # Akış ölçülemiyorsa ön denetim atlanıyor ve tek koruma yazma sonrası
+        # denetim kalıyor. Onun da işini yaptığı burada sınanıyor; aksi hâlde
+        # o dal hiç koşmuyordu.
+        self.upload("a.mp4", data=b"x" * (900 * 1024))
+        self.module.incoming_size = lambda file: None
+        before = self.uploads_dir()
+
+        response = self.upload("b.mp4", data=b"x" * (900 * 1024))
+        self.assertIn("Depolama alanı dolu", response.get_data(as_text=True))
+        self.assertEqual(self.uploads_dir(), before, "dosya geri alınmadı")
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_untracked_file_still_counts(self):
+        # videos.json'a girmemiş bir dosya da yer kaplıyor; kota dizine
+        # bakmazsa bu yolla atlatılabilirdi.
+        with open(os.path.join(self.tmp, "uploads", "artik.mp4"), "wb") as f:
+            f.write(b"x" * (900 * 1024))
+        response = self.upload("b.mp4", data=b"x" * (900 * 1024))
+        self.assertIn("Depolama alanı dolu", response.get_data(as_text=True))
+        self.assertEqual(self.stored(), [])
+
+
+class QuotaDisabledTests(MiniTubeTest):
+    env = {"MAX_TOTAL_UPLOAD_MB": "0", "MAX_UPLOAD_MB": "8"}
+
+    def test_zero_disables_the_quota(self):
+        for name in ("a.mp4", "b.mp4", "c.mp4"):
+            self.upload(name, data=b"x" * (600 * 1024))
+        self.assertEqual(len(self.stored()), 3)
 
 
 class UploadFaultToleranceTests(MiniTubeTest):

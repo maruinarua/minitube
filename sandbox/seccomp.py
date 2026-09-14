@@ -63,7 +63,9 @@ SYSCALLS_X86_64 = {
     "nanosleep": 35, "getpid": 39, "clone": 56, "fork": 57, "vfork": 58,
     "execve": 59, "exit": 60, "uname": 63, "fcntl": 72, "fsync": 74,
     "ftruncate": 77, "getcwd": 79, "rename": 82, "mkdir": 83, "unlink": 87,
-    "readlink": 89, "sysinfo": 99, "getuid": 102, "getgid": 104, "geteuid": 107,
+    "readlink": 89, "sysinfo": 99, "statfs": 137, "fstatfs": 138,
+    "mlock": 149, "munlock": 150, "get_mempolicy": 239,
+    "getuid": 102, "getgid": 104, "geteuid": 107,
     "execveat": 322, "getegid": 108, "getppid": 110, "getpgrp": 111, "sigaltstack": 131,
     "arch_prctl": 158, "gettid": 186,
     "time": 201, "futex": 202, "sched_getaffinity": 204, "getdents64": 217,
@@ -100,6 +102,11 @@ NETWORK_SYSCALLS = (
 # alındı, üstüne yalnızca kapanış/libc varyantları eklendi (exit_group,
 # rt_sigreturn, newfstatat/statx gibi aynı işin farklı isimleri).
 #
+# Liste ffmpeg **yapısına** bağlı, sürümüne değil: Ubuntu 24.04'ün dinamik
+# 6.1.1'i statik 7.0'ın hiç çağırmadığı üç şeyi çağırıyor ve üçü de SIGSYS
+# ile öldürüyordu. Tek tek tahmin yerine reddetme eylemi geçici olarak
+# RET_LOG yapılıp (kaydeder ama geçirir) tek koşuda tamamı ölçüldü.
+#
 # Listede bilerek OLMAYANLAR, saldırganın kod çalıştırsa bile
 # kullanamayacakları: socket/connect/bind (ağ), fork/vfork (yeni süreç),
 # ptrace (başka sürece girmek), mount/pivot_root/chroot, bpf,
@@ -123,6 +130,12 @@ FFMPEG_SYSCALLS = (
     "getuid", "geteuid", "getgid", "getegid", "fsync", "ftruncate", "unlink",
     "unlinkat", "access", "faccessat", "faccessat2", "getcwd", "fadvise64",
     "futex_waitv", "sysinfo",
+    # Dağıtım yapılarının ek olarak istedikleri (Ubuntu 24.04, ffmpeg 6.1.1).
+    # statfs/get_mempolicy yalnızca okuyor. mlock ise sayfaları belleğe
+    # kilitliyor, yani tek gerçek maliyeti olan bu: sınırı seccomp değil
+    # RLIMIT_MEMLOCK çiziyor ve minisandbox onu artık devralmak yerine
+    # açıkça kuruyor (bkz. Limits.locked_memory_bytes).
+    "statfs", "fstatfs", "get_mempolicy", "mlock", "munlock",
 )
 
 

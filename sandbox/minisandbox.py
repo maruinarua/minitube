@@ -100,11 +100,16 @@ class Limits:
         cpu_seconds=120,
         file_size_bytes=512 * 1024 * 1024,
         open_files=64,
+        locked_memory_bytes=64 * 1024 * 1024,
     ):
         self.address_space_bytes = address_space_bytes
         self.cpu_seconds = cpu_seconds
         self.file_size_bytes = file_size_bytes
         self.open_files = open_files
+        # mlock izin listesinde, dolayısıyla kilitlenebilecek bellek
+        # sınırlanmalı. Devralınan değere bırakmak olmaz: bu makinede 8 MiB
+        # geliyor ama kap yapılandırmasına göre sınırsız da olabiliyor.
+        self.locked_memory_bytes = locked_memory_bytes
 
     def as_dict(self):
         return {
@@ -112,6 +117,7 @@ class Limits:
             "cpu_seconds": self.cpu_seconds,
             "file_size_bytes": self.file_size_bytes,
             "open_files": self.open_files,
+            "locked_memory_bytes": self.locked_memory_bytes,
         }
 
 
@@ -560,6 +566,14 @@ def _stage2(spec):
     resource.setrlimit(resource.RLIMIT_CPU, (limits["cpu_seconds"],) * 2)
     resource.setrlimit(resource.RLIMIT_FSIZE, (limits["file_size_bytes"],) * 2)
     resource.setrlimit(resource.RLIMIT_NOFILE, (limits["open_files"],) * 2)
+    # Yalnızca düşürüyoruz: sert sınırı yükseltmek ana ad alanında
+    # CAP_SYS_RESOURCE istiyor ve burada yok - denemek ValueError veriyor.
+    # Devralınan değer zaten istenenden düşükse o daha sıkıdır, dokunma.
+    _memlock_hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)[1]
+    _memlock = limits["locked_memory_bytes"]
+    if _memlock_hard != resource.RLIM_INFINITY:
+        _memlock = min(_memlock, _memlock_hard)
+    resource.setrlimit(resource.RLIMIT_MEMLOCK, (_memlock,) * 2)
     # Çekirdek dökümü yok: çöken bir sürecin bellek görüntüsü girdinin
     # içeriğini yazılabilir bir dizine düşürebilirdi.
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))

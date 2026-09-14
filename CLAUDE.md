@@ -311,17 +311,34 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 175 tests (128 app + 47 sandbox)
+python -m unittest -v          # 196 tests (128 app + 47 sandbox + 21 fuzz)
 ```
 
 Sandbox tests skip in layers, and **the skip count is the thing to read** — a
-green suite that skipped everything is not evidence. Locally, 9 skip without
-ffmpeg. On a GitHub runner it was 25: Ubuntu 24.04 restricts unprivileged user
-namespaces through AppArmor, so every namespace-based test skipped too and CI's
-green said nothing about the sandbox. The workflow now clears that sysctl
-before the suite; if a runner refuses, the tests skip rather than fail, so
-check the count instead of trusting the colour. Point `FFMPEG_PATH` at a binary
-to run the ffmpeg-specific ones.
+green suite that skipped everything is not evidence. Two rounds of exactly that
+happened here. On a GitHub runner the count was 25: Ubuntu 24.04 restricts
+unprivileged user namespaces through AppArmor, so every namespace-based test
+skipped and CI's green said nothing about the sandbox; the workflow now clears
+that sysctl. It was then 12, because ffmpeg was not installed — so the one
+workload the sandbox exists for was never exercised in CI. The workflow now
+installs ffmpeg too, which leaves 1 (the fail-closed-without-AppArmor test,
+which can only run where AppArmor is absent).
+
+Both of those steps are the reason to keep reading the count rather than the
+colour: if a runner refuses the sysctl the tests skip rather than fail. The
+ffmpeg step is the exception and is deliberately fail-closed — skipping there
+would put the suite straight back into the state it just came out of.
+
+Locally the count is 3 without AppArmor and 14 without ffmpeg on top of that.
+Point `FFMPEG_PATH` at a binary if yours is not on `PATH`.
+
+**The seccomp allowlist depends on the ffmpeg build, not just its version.**
+The list was measured against a static ffmpeg 7.0; Ubuntu 24.04's dynamic
+6.1.1 additionally calls `statfs`, `get_mempolicy` and `mlock`, and each one
+killed the process with SIGSYS until it was added. If a new build dies with
+returncode -31, that is what happened. Don't guess the missing call one at a
+time — flip the deny action to `RET_LOG` (it logs and permits), run the job
+once, and read the whole set out of `dmesg`.
 
 `python -m sandbox.minisandbox --demo` shows the isolation with nothing
 installed. Three real bugs came out of running it — see sandbox/README.md.

@@ -259,8 +259,27 @@ awk 'NR>2 && $NF!="total" {print $NF}' trace.txt | sort -u
 
 Statik ffmpeg 7.0 ile çıkan küme 32 syscall. Üstüne yalnızca kapanış yolu ve
 libc varyantları eklendi (`exit_group`, `rt_sigreturn`, `newfstatat`/`statx`
-gibi aynı işin farklı isimleri). Başka bir ffmpeg derlemesine geçilirse
-ölçüm tekrarlanmalı.
+gibi aynı işin farklı isimleri).
+
+**"Başka bir derlemeye geçilirse ölçüm tekrarlanmalı" cümlesi burada teorik
+bir uyarı olarak duruyordu; öyle değilmiş.** CI'a ffmpeg kurulunca Ubuntu
+24.04'ün dinamik 6.1.1'i üç çağrı daha istedi ve üçü de `SIGSYS` ile
+öldürüyordu: `statfs`, `get_mempolicy`, `mlock`. Yani liste sürüme değil
+**yapıya** bağlı. Yeni bir derleme `-31` dönüş koduyla ölüyorsa sebep budur.
+
+Eksiği tek tek tahmin etmeyin. Reddetme eylemini geçici olarak `RET_LOG`
+yapın - kaydeder ama çağrıyı geçirir - işi bir kez koşturun ve kümenin
+tamamını `dmesg`'den okuyun:
+
+```bash
+dmesg | grep -o 'comm="ffmpeg".*syscall=[0-9]*'
+```
+
+Üçünden ikisi salt okuma. `mlock` ise sayfaları belleğe kilitliyor, yani
+maliyeti olan tek eklenen o: sınırını seccomp çizemez, `RLIMIT_MEMLOCK`
+çizer. O yüzden artık devralınmıyor, `Limits.locked_memory_bytes` ile
+açıkça kuruluyor (yalnızca aşağı doğru: sert sınırı yükseltmek ana ad
+alanında `CAP_SYS_RESOURCE` ister ve burada yok).
 
 İki ayrıntı ölçüm sırasında ortaya çıktı:
 

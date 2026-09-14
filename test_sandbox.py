@@ -291,6 +291,21 @@ class EngineTests(unittest.TestCase):
         )
         self.assertEqual(done.stdout.strip(), b"yok")
 
+    def test_locked_memory_is_bounded(self):
+        # mlock izin listesinde (ffmpeg'in bazı yapıları çağırıyor), o yüzden
+        # kilitlenebilecek belleğin sınırı seccomp'tan değil RLIMIT_MEMLOCK'tan
+        # geliyor. Devralınan değere bırakılırsa kap yapılandırmasına göre
+        # sınırsız olabiliyor - burada açıkça kurulduğu doğrulanıyor.
+        # Sınır bilerek devralınandan (bu makinede 8 MiB) farklı seçiliyor:
+        # yalnızca "makul bir değer" aranırsa test setrlimit hiç
+        # çağrılmasa da geçer - ölçüldü, geçiyordu.
+        done = self._sh("ulimit -l", limits=ms.Limits(locked_memory_bytes=1 << 20))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        reported = done.stdout.strip().decode()
+        self.assertNotEqual(reported, "unlimited", "kilitli bellek sınırsız")
+        # ulimit -l KiB cinsinden.
+        self.assertEqual(int(reported), 1024, "istenen sınır uygulanmadı")
+
     def test_proc_is_not_mounted(self):
         done = self._sh("if [ -d /proc/1 ]; then echo VAR; else echo yok; fi")
         self.assertEqual(done.stdout.strip(), b"yok")

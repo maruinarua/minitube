@@ -139,6 +139,16 @@ updates the counter in place. Everything else is a classic form POST +
 redirect. Preserve that split: don't convert form posts to fetch, or vice
 versa, without being asked.
 
+`/upload` also enforces a **total** cap on `uploads/`, not just a per-file one
+(`MAX_TOTAL_UPLOAD_MB`). Two checks, and they are not redundant: the first uses
+the incoming stream's size so a doomed upload is never written at all, the
+second re-checks the real on-disk total afterwards and deletes the file if it
+pushed the directory over. The second one is what covers a stream whose size
+cannot be measured — each check has its own test, because with only the
+obvious tests either one could be deleted and nothing would fail. The quota
+reads the directory rather than `videos.json`, so a file that never made it
+into a record still counts against it.
+
 `/upload` requires a file, a non-empty filename, a non-empty title, and an
 extension in `ALLOWED_EXTENSIONS`. Rejections now report back: the handler
 calls `flash()` and `index.html` renders the messages. `/comment` still drops
@@ -260,6 +270,7 @@ Runtime knobs, all via environment variables:
 | `PORT` | `5000` | Port |
 | `FLASK_DEBUG` | `0` | `1` enables the Werkzeug debugger — localhost only, never with a public `HOST` |
 | `MAX_UPLOAD_MB` | `256` | Upload size cap; exceeding it returns 413 |
+| `MAX_TOTAL_UPLOAD_MB` | `4096` | Total cap on `uploads/`. Over it, uploads are refused with a flash (not a 413 — the request itself is legal). `0` disables the quota. |
 | `SECRET_KEY` | generated | HMAC/session key. Unset means a `.secret_key` file is generated and reused. |
 | `RATE_LIMIT_WINDOW` | `3600` | Rate-limit window in seconds, shared by every limit below |
 | `RATE_LIMIT_UPLOAD` | `10` | Uploads allowed per client per window |
@@ -311,7 +322,7 @@ Things that are easy to get wrong here:
 The test suite is stdlib only — no runner to install:
 
 ```bash
-python -m unittest -v          # 196 tests (128 app + 47 sandbox + 21 fuzz)
+python -m unittest -v          # 205 tests (136 app + 48 sandbox + 21 fuzz)
 ```
 
 Sandbox tests skip in layers, and **the skip count is the thing to read** — a
@@ -451,8 +462,12 @@ it doesn't:
   job queue, because transcoding inside the upload request would block the
   single-threaded dev server. Don't wire it in as a side effect of another
   change — `sandbox/README.md` lists what the decision involves.
-- **No total disk quota.** Rate limiting slows disk fill but does not cap it —
-  a patient client can still keep uploading within its budget.
+- **The total quota is not concurrency-safe.** `MAX_TOTAL_UPLOAD_MB` caps
+  `uploads/`, but there is no lock, so two simultaneous uploads can both pass
+  the check and land together over the line — bounded by one
+  `MAX_UPLOAD_MB` per racing request. Same class of gap as `videos.json`'s
+  read-modify-write, and it needs the same fix (a real datastore), so don't
+  paper over it with a lock file here.
 - **IP-based identity** is still only an approximation of a person. Behind a
   proxy it needs `TRUSTED_PROXY_COUNT` set correctly; on a shared NAT several
   people look like one. Real accounts are the only real fix.
